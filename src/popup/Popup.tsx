@@ -149,8 +149,11 @@ export const Popup = () => {
   const [token, setToken] = useState<string | null>(null);
   const [currentTabId, setCurrentTabId] = useState<number | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
-  const [isPaused, setIsPaused] = useState(false);
   const [assistMode, setAssistMode] = useState<AssistMode>("autofill"); // Default to Autofill for portal workflows
+  // Whether the user has explicitly turned Copilot on for the current page in
+  // this tab. Nothing scans or resolves fields until this is true, and it
+  // resets to false on every navigation (see background.ts's resetPageState).
+  const [pageActive, setPageActive] = useState(false);
 
   // Autofill mode state
   const [autofillStatus, setAutofillStatus] = useState<{
@@ -173,6 +176,7 @@ export const Popup = () => {
   const [consistencyResult, setConsistencyResult] = useState<{
     status: string;
     rationale?: string;
+    sourceReference?: string;
   } | null>(null);
   const [isSaved, setIsSaved] = useState(false);
 
@@ -233,6 +237,13 @@ export const Popup = () => {
         },
       );
 
+      chrome.runtime.sendMessage(
+        { type: "GET_PAGE_ACTIVE", tabId },
+        (response) => {
+          setPageActive(Boolean(response?.active));
+        },
+      );
+
       chrome.storage.local.get([`autofillResult_${tabId}`], (res) => {
         if (res && res[`autofillResult_${tabId}`]) {
           setAutofillResult(
@@ -273,6 +284,7 @@ export const Popup = () => {
       ) {
         setAutofillResult(null);
         setResolutionData(null);
+        setPageActive(false);
       } else if (
         request.type === "SESSION_COMPLETION_PROMPT" &&
         (!currentTabIdRef.current || request.tabId === currentTabIdRef.current)
@@ -330,12 +342,15 @@ export const Popup = () => {
           }
         },
       );
+
+      chrome.runtime.sendMessage(
+        { type: "GET_PAGE_ACTIVE", tabId: newTabId },
+        (response) => {
+          setPageActive(Boolean(response?.active));
+        },
+      );
     };
     chrome.tabs.onActivated.addListener(tabActivatedListener);
-
-    chrome.storage.local.get(["isPaused"], (res) => {
-      if (res.isPaused !== undefined) setIsPaused(Boolean(res.isPaused));
-    });
 
     chrome.storage.local.get(["assistMode"], (res) => {
       if (res.assistMode) {
@@ -391,10 +406,20 @@ export const Popup = () => {
     });
   }, [selectedCaseId, currentTabId]);
 
-  const handleTogglePause = () => {
-    const val = !isPaused;
-    setIsPaused(val);
-    chrome.storage.local.set({ isPaused: val });
+  const handleActivatePage = () => {
+    if (!currentTabId) return;
+    chrome.runtime.sendMessage(
+      { type: "SET_PAGE_ACTIVE", tabId: currentTabId, active: true },
+      () => setPageActive(true),
+    );
+  };
+
+  const handleDeactivatePage = () => {
+    if (!currentTabId) return;
+    chrome.runtime.sendMessage(
+      { type: "SET_PAGE_ACTIVE", tabId: currentTabId, active: false },
+      () => setPageActive(false),
+    );
   };
 
   const handleAssistModeChange = (
@@ -516,12 +541,16 @@ export const Popup = () => {
     }
   };
 
-  const handleJumpToField = async (fieldKey: string) => {
+  const handleJumpToField = async (fieldKey: string, switchToFocus = false) => {
     const [tab] = await chrome.tabs.query({
       active: true,
       currentWindow: true,
     });
     if (tab && tab.id) {
+      if (switchToFocus) {
+        setAssistMode("focus");
+        chrome.storage.local.set({ assistMode: "focus" });
+      }
       chrome.tabs.sendMessage(tab.id, { type: "FOCUS_FIELD", fieldKey });
     }
   };
@@ -575,12 +604,23 @@ export const Popup = () => {
     const fieldKey =
       resolutionData.question.fields[0].fieldKey ||
       resolutionData.question.fields[0].name;
+    const fieldLabel =
+      cleanFieldLabel(resolutionData.question.fields[0].label) ||
+      resolutionData.question.headings?.find(
+        (h: string) => h && !h.toLowerCase().includes("application"),
+      ) ||
+      resolutionData.question.headings?.[0] ||
+      resolutionData.question.title;
 
     chrome.runtime.sendMessage(
       {
         type: "CHECK_CONSISTENCY",
         tabId: currentTabId,
-        payload: { field_key: fieldKey, user_answer: manualAnswer },
+        payload: {
+          field_key: fieldKey,
+          user_answer: manualAnswer,
+          label: fieldLabel || undefined,
+        },
       },
       (response) => {
         setIsChecking(false);
@@ -607,6 +647,13 @@ export const Popup = () => {
     const fieldKey =
       resolutionData.question.fields[0].fieldKey ||
       resolutionData.question.fields[0].name;
+    const fieldLabel =
+      cleanFieldLabel(resolutionData.question.fields[0].label) ||
+      resolutionData.question.headings?.find(
+        (h: string) => h && !h.toLowerCase().includes("application"),
+      ) ||
+      resolutionData.question.headings?.[0] ||
+      resolutionData.question.title;
 
     chrome.runtime.sendMessage(
       {
@@ -617,11 +664,16 @@ export const Popup = () => {
           user_answer: manualAnswer,
           status: consistencyResult.status,
           rationale: consistencyResult.rationale,
+          label: fieldLabel || undefined,
         },
       },
       (response) => {
         if (response?.success) {
           setIsSaved(true);
+          // Saving the override to the case dossier doesn't itself change
+          // anything on the page -- write the confirmed answer into the
+          // actual form field too, so the user doesn't have to type it twice.
+          handleAccept(manualAnswer, fieldKey);
         }
       },
     );
@@ -695,14 +747,22 @@ export const Popup = () => {
         {token ? (
           <Tooltip
             title={
-              !isPaused
-                ? "Copilot is actively assisting. Click to pause."
-                : "Copilot is paused. Click to activate."
+              !selectedCaseId
+                ? "Select an application first."
+                : pageActive
+                  ? "Active on this page. Click to turn off."
+                  : "Not active on this page. Click to activate."
             }
             arrow
           >
             <Box
-              onClick={handleTogglePause}
+              onClick={
+                !selectedCaseId
+                  ? undefined
+                  : pageActive
+                    ? handleDeactivatePage
+                    : handleActivatePage
+              }
               role="button"
               tabIndex={0}
               sx={{
@@ -712,17 +772,20 @@ export const Popup = () => {
                 px: 1.25,
                 py: 0.45,
                 borderRadius: "6px",
-                bgcolor: !isPaused ? "#ECFDF5" : "#F8FAFC",
+                bgcolor: pageActive ? "#ECFDF5" : "#F8FAFC",
                 border: "1px solid",
-                borderColor: !isPaused ? "#A7F3D0" : "#E2E8F0",
-                cursor: "pointer",
+                borderColor: pageActive ? "#A7F3D0" : "#E2E8F0",
+                cursor: selectedCaseId ? "pointer" : "default",
+                opacity: selectedCaseId ? 1 : 0.6,
                 userSelect: "none",
                 transition: "all 0.15s ease",
-                "&:hover": {
-                  bgcolor: !isPaused ? "#D1FAE5" : "#F1F5F9",
-                  borderColor: !isPaused ? "#6EE7B7" : "#CBD5E1",
-                  transform: "translateY(-1px)",
-                },
+                "&:hover": selectedCaseId
+                  ? {
+                      bgcolor: pageActive ? "#D1FAE5" : "#F1F5F9",
+                      borderColor: pageActive ? "#6EE7B7" : "#CBD5E1",
+                      transform: "translateY(-1px)",
+                    }
+                  : {},
                 "&:active": {
                   transform: "translateY(0)",
                 },
@@ -733,8 +796,8 @@ export const Popup = () => {
                   width: 7,
                   height: 7,
                   borderRadius: "50%",
-                  bgcolor: !isPaused ? "#10B981" : "#F59E0B",
-                  boxShadow: !isPaused
+                  bgcolor: pageActive ? "#10B981" : "#94A3B8",
+                  boxShadow: pageActive
                     ? "0 0 6px rgba(16, 185, 129, 0.45)"
                     : "none",
                 }}
@@ -743,12 +806,12 @@ export const Popup = () => {
                 sx={{
                   fontSize: "0.75rem",
                   fontWeight: 700,
-                  color: !isPaused ? "#065F46" : "#475569",
+                  color: pageActive ? "#065F46" : "#475569",
                   letterSpacing: 0.2,
                   lineHeight: 1,
                 }}
               >
-                {!isPaused ? "Active" : "Paused"}
+                {pageActive ? "Active" : "Not active"}
               </Typography>
             </Box>
           </Tooltip>
@@ -847,6 +910,98 @@ export const Popup = () => {
                 selectedCaseId={selectedCaseId}
               />
             </Paper>
+
+            {/* PER-PAGE ACTIVATION GATE: Copilot never scans or resolves
+                fields on a page until the user explicitly turns it on here --
+                it does not run automatically just because a case is selected. */}
+            {selectedCaseId && !pageActive ? (
+              <Paper
+                variant="outlined"
+                sx={{
+                  flex: 1,
+                  p: 3,
+                  borderRadius: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  textAlign: "center",
+                  bgcolor: "#FFFFFF",
+                  borderColor: "#E2E8F0",
+                  boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 52,
+                    height: 52,
+                    borderRadius: 1,
+                    bgcolor: "#EFF6FF",
+                    color: BRAND_PRIMARY,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    mb: 1.5,
+                  }}
+                >
+                  <ShieldIcon sx={{ fontSize: 28 }} />
+                </Box>
+                <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                  Not Active on This Page
+                </Typography>
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ mb: 2, maxWidth: 280 }}
+                >
+                  Immpal only reads or fills this page's fields once you turn
+                  it on here. It never runs automatically in the background.
+                </Typography>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  onClick={handleActivatePage}
+                  startIcon={<AutofillModeIcon sx={{ color: "#FFFFFF" }} />}
+                  sx={{ fontWeight: 700, color: "#FFFFFF !important" }}
+                >
+                  Activate on This Page
+                </Button>
+              </Paper>
+            ) : (
+              <>
+                {selectedCaseId && pageActive && (
+                  <Box
+                    sx={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      px: 1.25,
+                      py: 0.75,
+                      borderRadius: 1,
+                      bgcolor: "#ECFDF5",
+                      border: "1px solid #A7F3D0",
+                    }}
+                  >
+                    <Typography sx={{ fontSize: "0.75rem", fontWeight: 700, color: "#065F46" }}>
+                      Active on this page
+                    </Typography>
+                    <Button
+                      size="small"
+                      onClick={handleDeactivatePage}
+                      sx={{
+                        fontSize: "0.7rem",
+                        fontWeight: 700,
+                        color: "#065F46",
+                        textTransform: "none",
+                        minWidth: 0,
+                        p: 0,
+                        "&:hover": { bgcolor: "transparent", textDecoration: "underline" },
+                      }}
+                    >
+                      Turn off
+                    </Button>
+                  </Box>
+                )}
 
             {/* AUTOFILL MODE VIEW */}
             {assistMode === "autofill" && (
@@ -1079,7 +1234,7 @@ export const Popup = () => {
                               {autofillResult.skippedItems.map((item) => (
                                 <Box
                                   key={item.key}
-                                  onClick={() => handleJumpToField(item.key)}
+                                  onClick={() => handleJumpToField(item.key, true)}
                                   sx={{
                                     p: 1,
                                     borderRadius: 1,
@@ -1358,47 +1513,71 @@ export const Popup = () => {
                         <>
                           <Button
                             variant="contained"
-                            color="primary"
                             fullWidth
                             size="large"
-                            disabled={autofillStatus?.type === "info"}
-                            onClick={() => handleStartAutofill(true)}
-                            startIcon={
-                              autofillStatus?.type === "info" ? (
-                                <CircularProgress size={20} color="inherit" />
-                              ) : (
-                                <AutofillModeIcon />
-                              )
-                            }
+                            onClick={() => {
+                              if (autofillResult.skippedItems[0]) {
+                                handleJumpToField(autofillResult.skippedItems[0].key, true);
+                              } else {
+                                setAssistMode("focus");
+                                chrome.storage.local.set({ assistMode: "focus" });
+                              }
+                            }}
+                            startIcon={<FocusModeIcon />}
                             sx={{
                               py: 1.4,
                               fontSize: "0.925rem",
                               fontWeight: 700,
                               letterSpacing: 0.2,
+                              bgcolor: "#1E293B",
+                              color: "#FFFFFF",
+                              "&:hover": { bgcolor: "#0F172A" },
+                            }}
+                          >
+                            Review Skipped in Focus Assist ({autofillResult.skippedCount}) →
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            fullWidth
+                            size="medium"
+                            disabled={autofillStatus?.type === "info"}
+                            onClick={() => handleStartAutofill(true)}
+                            startIcon={
+                              autofillStatus?.type === "info" ? (
+                                <CircularProgress size={18} sx={{ color: BRAND_PRIMARY }} />
+                              ) : (
+                                <AutofillModeIcon sx={{ color: BRAND_PRIMARY }} />
+                              )
+                            }
+                            sx={{
+                              py: 0.9,
+                              fontSize: "0.825rem",
+                              fontWeight: 700,
+                              textTransform: "none",
+                              color: `${BRAND_PRIMARY} !important`,
+                              borderColor: "#BFDBFE",
+                              bgcolor: "#FFFFFF",
+                              "&:hover": {
+                                borderColor: BRAND_PRIMARY,
+                                bgcolor: "#EFF6FF",
+                              },
+                              ...(autofillStatus?.type === "info"
+                                ? {
+                                    color: `${BRAND_PRIMARY} !important`,
+                                    borderColor: `${BRAND_PRIMARY} !important`,
+                                    bgcolor: "#EFF6FF !important",
+                                    "&.Mui-disabled": {
+                                      color: `${BRAND_PRIMARY} !important`,
+                                      borderColor: `${BRAND_PRIMARY} !important`,
+                                      bgcolor: "#EFF6FF !important",
+                                    },
+                                  }
+                                : {}),
                             }}
                           >
                             {autofillStatus?.type === "info"
                               ? "Writing Answers to Form…"
-                              : `Fill Remaining Fields (${autofillResult.skippedCount})`}
-                          </Button>
-                          <Button
-                            variant="text"
-                            size="small"
-                            disabled={autofillStatus?.type === "info"}
-                            onClick={() => handleStartAutofill(false)}
-                            sx={{
-                              color: "#64748B",
-                              fontSize: "0.75rem",
-                              fontWeight: 600,
-                              textTransform: "none",
-                              py: 0.5,
-                              "&:hover": {
-                                color: BRAND_PRIMARY,
-                                bgcolor: "transparent",
-                              },
-                            }}
-                          >
-                            Re-run Full Auto-fill
+                              : "Re-run Auto-fill"}
                           </Button>
                         </>
                       ) : autofillResult &&
@@ -1459,9 +1638,9 @@ export const Popup = () => {
                           onClick={() => handleStartAutofill(false)}
                           startIcon={
                             autofillStatus?.type === "info" ? (
-                              <CircularProgress size={20} color="inherit" />
+                              <CircularProgress size={20} sx={{ color: "#FFFFFF" }} />
                             ) : (
-                              <AutofillModeIcon />
+                              <AutofillModeIcon sx={{ color: "#FFFFFF" }} />
                             )
                           }
                           sx={{
@@ -1469,6 +1648,19 @@ export const Popup = () => {
                             fontSize: "0.925rem",
                             fontWeight: 700,
                             letterSpacing: 0.2,
+                            color: "#FFFFFF !important",
+                            background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)",
+                            ...(autofillStatus?.type === "info"
+                              ? {
+                                  background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%) !important",
+                                  color: "#FFFFFF !important",
+                                  opacity: 0.92,
+                                  "&.Mui-disabled": {
+                                    background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%) !important",
+                                    color: "#FFFFFF !important",
+                                  },
+                                }
+                              : {}),
                           }}
                         >
                           {autofillStatus?.type === "info"
@@ -1612,19 +1804,47 @@ export const Popup = () => {
                           }}
                         >
                           {cleanFieldLabel(
-                            resolutionData.question.fields &&
-                              resolutionData.question.fields.length > 0
-                              ? resolutionData.question.fields
-                                  .map(
-                                    (f: any) =>
-                                      f.label ||
-                                      f.placeholder ||
-                                      f.name ||
-                                      f.id,
-                                  )
-                                  .join(", ")
-                              : resolutionData.question.headings[0] ||
-                                  resolutionData.question.title,
+                            (() => {
+                              const fields = resolutionData.question.fields || [];
+                              const meaningfulLabels = fields
+                                .map((f: any) =>
+                                  cleanFieldLabel(f.label || f.placeholder),
+                                )
+                                .filter((lbl: string) => {
+                                  if (!lbl) return false;
+                                  // Reject raw machine keys (e.g. codePassport_select, mat-radio-group-37)
+                                  const isOpaque =
+                                    /^(mat-radio-group-|mat-input-|select_|input_|field_|:r)/i.test(
+                                      lbl,
+                                    ) ||
+                                    (!lbl.includes(" ") &&
+                                      (lbl.includes("_") || lbl.includes("-")));
+                                  return !isOpaque;
+                                });
+
+                              if (meaningfulLabels.length > 0) {
+                                return meaningfulLabels.join(", ");
+                              }
+
+                              const headingFallback =
+                                resolutionData.question.headings?.find(
+                                  (h: string) =>
+                                    h && !h.toLowerCase().includes("application"),
+                                ) ||
+                                resolutionData.question.headings?.[0] ||
+                                resolutionData.question.title;
+
+                              if (headingFallback) return headingFallback;
+
+                              const raw =
+                                fields[0]?.label ||
+                                fields[0]?.name ||
+                                fields[0]?.id ||
+                                "Form Question";
+                              return raw
+                                .replace(/[_]/g, " ")
+                                .replace(/\b\w/g, (c: string) => c.toUpperCase());
+                            })(),
                           )}
                         </Typography>
                       </Box>
@@ -1717,6 +1937,31 @@ export const Popup = () => {
                                   resolutionData.resolution.message ||
                                   "No answer available."}
                           </Typography>
+
+                          {resolutionData.resolution.sourceReference && (
+                            <Box
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 0.6,
+                                mt: 1.25,
+                                pt: 1,
+                                borderTop: "1px dashed #E2E8F0",
+                              }}
+                            >
+                              <ShieldIcon sx={{ fontSize: 13, color: "#059669" }} />
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: "#64748B",
+                                  fontSize: "0.7rem",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                Source: {resolutionData.resolution.sourceReference}
+                              </Typography>
+                            </Box>
+                          )}
                         </Box>
                       </>
                     )}
@@ -1885,9 +2130,11 @@ export const Popup = () => {
                             </Button>
                           )}
 
-                        {/* When there is NO autofill answer (e.g. INFORMATION_MISSING or manual selection), provide a primary "Next Question" button */}
+                        {/* When there is NO autofill answer (e.g. INFORMATION_MISSING or manual selection), provide a primary "Next Question" button --
+                            but only when another field actually exists to jump to; on the page's last field there is nothing to advance to. */}
                         {!resolutionData.resolution.answer &&
-                          resolutionData.resolution.status !== "MULTIPLE_POSSIBLE_FACTS" && (
+                          resolutionData.resolution.status !== "MULTIPLE_POSSIBLE_FACTS" &&
+                          (activeField?.hasNextField !== false ? (
                             <Button
                               variant="contained"
                               color="primary"
@@ -1902,9 +2149,29 @@ export const Popup = () => {
                                 borderRadius: "8px",
                               }}
                             >
-                              Next Question
+                              Focus Next Field
                             </Button>
-                          )}
+                          ) : (
+                            <Box
+                              sx={{
+                                p: 1.5,
+                                borderRadius: 1,
+                                bgcolor: "#EFF6FF",
+                                border: "1px solid #BFDBFE",
+                                textAlign: "center",
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                sx={{ color: "#1E40AF", fontWeight: 600, display: "block" }}
+                              >
+                                This is the last question on this page. Once
+                                you've filled it in, click{" "}
+                                <strong>Save and continue</strong> on the
+                                portal to proceed.
+                              </Typography>
+                            </Box>
+                          ))}
 
                         {/* Manual Override & Next Question Navigation --
                             not offered for file/document fields, which have
@@ -1940,29 +2207,41 @@ export const Popup = () => {
                               I'll answer this question myself
                             </Button>
 
-                            {resolutionData.resolution.answer && (
-                              <Button
-                                variant="text"
-                                size="small"
-                                endIcon={<ArrowIcon sx={{ fontSize: 14 }} />}
-                                onClick={handleAdvanceNextField}
-                                sx={{
-                                  color: BRAND_PRIMARY,
-                                  fontSize: "0.75rem",
-                                  fontWeight: 700,
-                                  py: 0.4,
-                                  px: 1.25,
-                                  borderRadius: "6px",
-                                  textTransform: "none",
-                                  "&:hover": {
-                                    color: "#1D4ED8",
-                                    bgcolor: "rgba(37, 99, 235, 0.04)",
-                                  },
-                                }}
-                              >
-                                Next Question
-                              </Button>
-                            )}
+                            {resolutionData.resolution.answer &&
+                              (activeField?.hasNextField !== false ? (
+                                <Button
+                                  variant="text"
+                                  size="small"
+                                  endIcon={<ArrowIcon sx={{ fontSize: 14 }} />}
+                                  onClick={handleAdvanceNextField}
+                                  sx={{
+                                    color: BRAND_PRIMARY,
+                                    fontSize: "0.75rem",
+                                    fontWeight: 700,
+                                    py: 0.4,
+                                    px: 1.25,
+                                    borderRadius: "6px",
+                                    textTransform: "none",
+                                    "&:hover": {
+                                      color: "#1D4ED8",
+                                      bgcolor: "rgba(37, 99, 235, 0.04)",
+                                    },
+                                  }}
+                                >
+                                  Focus Next Field
+                                </Button>
+                              ) : (
+                                <Typography
+                                  sx={{
+                                    fontSize: "0.7rem",
+                                    fontWeight: 600,
+                                    color: "#64748B",
+                                    px: 1.25,
+                                  }}
+                                >
+                                  Last question -- click Save and continue
+                                </Typography>
+                              ))}
                           </Box>
                         ) : (
                           <Paper
@@ -2075,10 +2354,39 @@ export const Popup = () => {
                               size="small"
                               onClick={handleCheckConsistency}
                               disabled={!manualAnswer || isChecking}
-                              sx={{ py: 1, color: "#FFFFFF !important" }}
+                              sx={{
+                                py: 1,
+                                fontWeight: 700,
+                                color: "#FFFFFF !important",
+                                ...(isChecking
+                                  ? {
+                                      background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%) !important",
+                                      color: "#FFFFFF !important",
+                                      opacity: 0.92,
+                                      "&.Mui-disabled": {
+                                        background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%) !important",
+                                        color: "#FFFFFF !important",
+                                      },
+                                    }
+                                  : !manualAnswer
+                                  ? {
+                                      background: "#E2E8F0 !important",
+                                      bgcolor: "#E2E8F0 !important",
+                                      color: "#94A3B8 !important",
+                                      boxShadow: "none !important",
+                                      "&.Mui-disabled": {
+                                        background: "#E2E8F0 !important",
+                                        bgcolor: "#E2E8F0 !important",
+                                        color: "#94A3B8 !important",
+                                      },
+                                    }
+                                  : {
+                                      background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)",
+                                    }),
+                              }}
                             >
                               {isChecking ? (
-                                <CircularProgress size={18} color="inherit" />
+                                <CircularProgress size={18} sx={{ color: "#FFFFFF" }} />
                               ) : (
                                 "Check Consistency with Dossier"
                               )}
@@ -2094,36 +2402,112 @@ export const Popup = () => {
                                   border: "1px solid #E2E8F0",
                                 }}
                               >
-                                <Typography
-                                  variant="caption"
-                                  sx={{
-                                    fontWeight: 700,
-                                    color:
-                                      consistencyResult.status === "CONSISTENT"
-                                        ? "#059669"
-                                        : "#D97706",
-                                    display: "block",
-                                  }}
-                                >
-                                  Consistency: {consistencyResult.status}
-                                </Typography>
+                                {(() => {
+                                  const status = consistencyResult.status;
+                                  let label = status;
+                                  let color = "#D97706";
+                                  let bg = "#FFFBEB";
+                                  let border = "#FDE68A";
+
+                                  if (status === "CONSISTENT") {
+                                    label = "Consistent with Case";
+                                    color = "#059669";
+                                    bg = "#ECFDF5";
+                                    border = "#A7F3D0";
+                                  } else if (status === "NEW_INFORMATION") {
+                                    label = "New Information";
+                                    color = "#2563EB";
+                                    bg = "#EFF6FF";
+                                    border = "#BFDBFE";
+                                  } else if (
+                                    status === "DIFFERENT_FROM_CASE_HISTORY" ||
+                                    status === "CONFLICT"
+                                  ) {
+                                    label = "Different from Case History";
+                                    color = "#D97706";
+                                    bg = "#FFFBEB";
+                                    border = "#FDE68A";
+                                  } else if (status === "UNABLE_TO_VERIFY") {
+                                    label = "Unable to Verify";
+                                    color = "#64748B";
+                                    bg = "#F8FAFC";
+                                    border = "#E2E8F0";
+                                  }
+
+                                  return (
+                                    <Chip
+                                      size="small"
+                                      label={label}
+                                      sx={{
+                                        mb: 0.75,
+                                        bgcolor: bg,
+                                        color,
+                                        border: `1px solid ${border}`,
+                                        fontWeight: 700,
+                                        fontSize: "0.75rem",
+                                      }}
+                                    />
+                                  );
+                                })()}
                                 {consistencyResult.rationale && (
                                   <Typography
                                     variant="caption"
                                     color="text.secondary"
-                                    sx={{ display: "block", mt: 0.5 }}
+                                    sx={{ display: "block", mt: 0.5, lineHeight: 1.45 }}
                                   >
                                     {consistencyResult.rationale}
                                   </Typography>
                                 )}
+                                {consistencyResult.sourceReference && (
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      display: "block",
+                                      mt: 0.5,
+                                      color: "#64748B",
+                                      fontSize: "0.6875rem",
+                                      fontFamily: "monospace",
+                                      bgcolor: "#F1F5F9",
+                                      px: 0.75,
+                                      py: 0.25,
+                                      borderRadius: "4px",
+                                      width: "fit-content",
+                                    }}
+                                  >
+                                    🛡️ Source: {consistencyResult.sourceReference}
+                                  </Typography>
+                                )}
 
                                 <Button
-                                  variant="outlined"
+                                  variant={isSaved ? "contained" : "outlined"}
                                   size="small"
                                   fullWidth
                                   onClick={handleSaveOverride}
                                   disabled={isSaved}
-                                  sx={{ mt: 1 }}
+                                  sx={{
+                                    mt: 1,
+                                    fontWeight: 700,
+                                    ...(isSaved
+                                      ? {
+                                          bgcolor: "#10B981 !important",
+                                          background: "#10B981 !important",
+                                          color: "#FFFFFF !important",
+                                          borderColor: "transparent !important",
+                                          "&.Mui-disabled": {
+                                            bgcolor: "#10B981 !important",
+                                            background: "#10B981 !important",
+                                            color: "#FFFFFF !important",
+                                          },
+                                        }
+                                      : {
+                                          color: BRAND_PRIMARY,
+                                          borderColor: BRAND_PRIMARY,
+                                          "&:hover": {
+                                            bgcolor: "#EFF6FF",
+                                            borderColor: "#1D4ED8",
+                                          },
+                                        }),
+                                  }}
                                 >
                                   {isSaved
                                     ? "Saved to Immpal ✓"
@@ -2194,11 +2578,13 @@ export const Popup = () => {
                         },
                       }}
                     >
-                      Find Next Question
+                      Focus Next Field
                     </Button>
                   </Box>
                 )}
               </Paper>
+            )}
+              </>
             )}
           </Box>
 

@@ -60,6 +60,65 @@ const pageContextKey = (tabId: number) => `pageContext_${tabId}`;
 // The field the user most recently focused, so a resolution that lands after
 // the user has already moved on doesn't get pushed to the panel out of order.
 const focusedFieldKey = (tabId: number) => `focusedField_${tabId}`;
+// Whether the user has explicitly activated Copilot on the CURRENT page in
+// this tab. Defaults to inactive on every navigation -- the content script
+// injects into every page (so it can work on any government portal) but must
+// never scan fields or call the resolution API until the user opts in here,
+// one page view at a time.
+const pageActiveKey = (tabId: number) => `pageActive_${tabId}`;
+
+// ---------------------------------------------------------------------------
+// EXTENSION ACTIVITY LOGGING: session + page-visit trail
+//
+// Ties every Copilot audit event back to who used the extension, on what
+// case, and what portal pages they visited -- distinct from sessionKey()
+// above, which only tracks the unrelated "has the user finished this step"
+// completion-prompt state.
+// ---------------------------------------------------------------------------
+const extSessionKey = (tabId: number) => `extSession_${tabId}`;
+
+function startExtensionSession(tabId: number, caseId: string) {
+  fetchWithAuth(`/cases/${caseId}/extension/sessions`, {
+    method: 'POST',
+    body: JSON.stringify({ extensionVersion: chrome.runtime.getManifest().version }),
+  })
+    .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`status ${res.status}`))))
+    .then((data) => {
+      const sessionId = data?.data?.id;
+      if (!sessionId) return;
+      chrome.storage.local.set({ [extSessionKey(tabId)]: sessionId }, () => {
+        // Log the page the tab is already on, in case the case was activated
+        // after the page had already loaded.
+        chrome.tabs.get(tabId, (tab) => {
+          if (tab?.url) recordPageVisit(tabId, tab.url);
+        });
+      });
+    })
+    .catch((err) => console.warn("[Immpal] Failed to start extension session:", err));
+}
+
+function recordPageVisit(tabId: number, url: string) {
+  if (!url || !/^https?:/i.test(url)) return;
+  chrome.storage.local.get([extSessionKey(tabId)], (res) => {
+    const sessionId = res[extSessionKey(tabId)];
+    if (!sessionId) return;
+    fetchWithAuth(`/cases/extension/sessions/${sessionId}/page-visits`, {
+      method: 'POST',
+      body: JSON.stringify({ url }),
+    }).catch((err) => console.warn("[Immpal] Failed to record page visit:", err));
+  });
+}
+
+function endExtensionSession(tabId: number) {
+  chrome.storage.local.get([extSessionKey(tabId)], (res) => {
+    const sessionId = res[extSessionKey(tabId)];
+    if (!sessionId) return;
+    fetchWithAuth(`/cases/extension/sessions/${sessionId}/end`, {
+      method: 'POST',
+    }).catch(() => { /* best-effort -- the server-side reaper covers a killed tab */ });
+    chrome.storage.local.remove([extSessionKey(tabId)]);
+  });
+}
 
 /** Builds the popup-facing {question, resolution} shape for one field and pushes it as QUESTION_RESOLVED. */
 function pushFieldResolution(
@@ -100,6 +159,7 @@ function resetPageState(tabId: number) {
     fieldCacheKey(tabId),
     pageContextKey(tabId),
     focusedFieldKey(tabId),
+    pageActiveKey(tabId),
   ]);
   chrome.runtime.sendMessage({ type: "PAGE_NAVIGATED", tabId }).catch(() => {});
 }
@@ -116,6 +176,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.url) {
     resetPageState(tabId);
   }
+});
+
+// A tab closing is the reliable end-of-session signal for a clean close;
+// a killed tab (browser crash, force-quit) is instead caught by the
+// server-side reaper in ExtensionActivityService.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  endExtensionSession(tabId);
 });
 
 // Listen for messages from the popup or content scripts
@@ -216,27 +283,90 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // ---------------------------------------------------------------------------
 
   if (request.type === "FETCH_AUTOFILL_MAPPING") {
-    fetchWithAuth(`/cases/${request.payload.caseId}/copilot/autofill`, {
-      method: 'POST',
-      body: JSON.stringify({
-        url: request.payload.url,
-        title: request.payload.title,
-        headings: request.payload.headings,
-        mainText: request.payload.mainText,
-        fields: request.payload.fields,
-      })
-    })
-      .then(res => {
-        if (!res.ok) throw new Error("Failed to fetch autofill mapping");
-        return res.json();
-      })
-      .then(data => {
-        sendResponse(data);
-      })
-      .catch(err => {
-        console.error("Error fetching autofill mapping:", err);
-        sendResponse({ success: false, message: err.message });
-      });
+    const tabId = sender.tab?.id;
+    chrome.storage.local.get(
+      tabId !== undefined ? [extSessionKey(tabId), fieldCacheKey(tabId)] : [],
+      (sessionRes) => {
+        const existingCache: Record<string, any> =
+          tabId !== undefined ? sessionRes[fieldCacheKey(tabId)] || {} : {};
+        const requestedFields = request.payload.fields || [];
+
+        // If all requested fields are already in cache, build autofill response from cache (0 redundant LLM calls)
+        const allCached =
+          requestedFields.length > 0 &&
+          requestedFields.every((f: any) => existingCache[f.fieldKey]?.resolution);
+
+        if (allCached) {
+          const fills: Record<string, any> = {};
+          const resolutions: Record<string, any> = {};
+          for (const field of requestedFields) {
+            const item = existingCache[field.fieldKey];
+            if (item) {
+              resolutions[field.fieldKey] = item.resolution;
+              if (
+                (item.resolution.status === "ANSWER_AVAILABLE" ||
+                  item.resolution.status === "SUGGESTED_NARRATIVE") &&
+                item.resolution.answer
+              ) {
+                fills[field.fieldKey] = {
+                  value: item.resolution.answer,
+                  status: item.resolution.status,
+                };
+              }
+            }
+          }
+          const total = requestedFields.length;
+          const filled = Object.keys(fills).length;
+          sendResponse({
+            success: true,
+            data: {
+              fills,
+              summary: { filled, totalFields: total, skipped: total - filled },
+              resolutions,
+            },
+          });
+          return;
+        }
+
+        fetchWithAuth(`/cases/${request.payload.caseId}/copilot/autofill`, {
+          method: 'POST',
+          body: JSON.stringify({
+            url: request.payload.url,
+            title: request.payload.title,
+            headings: request.payload.headings,
+            mainText: request.payload.mainText,
+            fields: request.payload.fields,
+            sessionId: tabId !== undefined ? sessionRes[extSessionKey(tabId)] : undefined,
+          }),
+        })
+          .then((res) => {
+            if (!res.ok) throw new Error("Failed to fetch autofill mapping");
+            return res.json();
+          })
+          .then((data) => {
+            // Cache resolutions returned by autofill into fieldCache so Focus Assist has them immediately
+            if (tabId !== undefined && data.data?.resolutions) {
+              const resMap = data.data.resolutions;
+              const fieldCache: Record<string, any> = { ...existingCache };
+              for (const field of requestedFields) {
+                const resEntry = resMap[field.fieldKey];
+                if (resEntry) {
+                  fieldCache[field.fieldKey] = { field, resolution: resEntry };
+                }
+              }
+              chrome.storage.local.set({
+                [fieldCacheKey(tabId)]: fieldCache,
+                [pageContextKey(tabId)]: request.payload,
+              });
+            }
+            sendResponse(data);
+          })
+          .catch((err) => {
+            console.error("Error fetching autofill mapping:", err);
+            sendResponse({ success: false, message: err.message });
+          });
+      },
+    );
     return true; // async response
   }
 
@@ -265,11 +395,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             pageContextKey(tabId),
             focusedFieldKey(tabId),
             resolutionKey(tabId),
+            extSessionKey(tabId),
           ]);
         }
         sendResponse({ success: true, changed: isChanged });
         if (tabId) {
           chrome.tabs.sendMessage(tabId, { type: "RECHECK_PAGE" }).catch(() => {});
+          // Opens (or resumes) the ExtensionSession that every audit event and
+          // page visit for this tab/case will be stamped with.
+          startExtensionSession(tabId, newCaseId);
         }
       });
     });
@@ -285,6 +419,56 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // PER-PAGE ACTIVATION GATE: nothing scans or resolves fields on a page
+  // until the user explicitly turns Copilot on for that page, from the popup.
+  // ---------------------------------------------------------------------------
+
+  if (request.type === "SET_PAGE_ACTIVE") {
+    const tabId = request.tabId;
+    const active = Boolean(request.active);
+    if (!tabId) {
+      sendResponse({ success: false });
+      return false;
+    }
+    chrome.storage.local.set({ [pageActiveKey(tabId)]: active }, () => {
+      chrome.tabs
+        .sendMessage(tabId, { type: active ? "PAGE_ACTIVATED" : "PAGE_DEACTIVATED" })
+        .catch(() => { /* content script may not be ready yet */ })
+        .finally(() => sendResponse({ success: true }));
+
+      if (active) {
+        // Session/page-visit tracking starts from this explicit click and only
+        // this click -- never from merely selecting a case or switching tabs.
+        chrome.storage.local.get([caseKey(tabId), "lastActiveCaseId"], (caseRes) => {
+          const caseId = caseRes[caseKey(tabId)] || caseRes.lastActiveCaseId;
+          if (caseId) startExtensionSession(tabId, caseId as string);
+        });
+      } else {
+        // Turn Off: wipe all tab-scoped resolution cache so the next activation
+        // starts completely fresh. We deliberately keep activeCase (the user
+        // didn't change their case) and assistMode (user preference) and auth.
+        chrome.storage.local.remove([
+          fieldCacheKey(tabId),
+          pageContextKey(tabId),
+          focusedFieldKey(tabId),
+          resolutionKey(tabId),
+          sessionKey(tabId),
+          `autofillResult_${tabId}`,
+        ]);
+      }
+    });
+    return true;
+  }
+
+  if (request.type === "GET_PAGE_ACTIVE") {
+    const tabId = request.tabId;
+    chrome.storage.local.get([pageActiveKey(tabId)], (res) => {
+      sendResponse({ active: Boolean(res[pageActiveKey(tabId)]) });
+    });
+    return true;
+  }
+
   // Resolves every newly-seen field on the page in a single backend call.
   // The content script only sends fields it hasn't already sent, so this fires
   // once per page/SPA-navigation/mutation batch rather than once per field.
@@ -296,9 +480,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       url: string; title: string; headings: string[]; mainText: string[]; fields: any[];
     };
 
-    chrome.storage.local.get([caseKey(tabId), "lastActiveCaseId", "isPaused"], (res) => {
-      if (res.isPaused) return;
-
+    chrome.storage.local.get(
+      [caseKey(tabId), "lastActiveCaseId", extSessionKey(tabId)],
+      (res) => {
       const caseId = res[caseKey(tabId)] || res.lastActiveCaseId;
       if (!caseId) {
         console.warn("[Immpal] No active case selected for this tab. Ignoring field batch.");
@@ -309,7 +493,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       fetchWithAuth(`/cases/${caseId}/muscle/resolve-question`, {
         method: 'POST',
-        body: JSON.stringify(context)
+        body: JSON.stringify({ ...context, sessionId: res[extSessionKey(tabId)] })
       })
         .then(res => {
           if (!res.ok) throw new Error(`Failed to resolve fields: ${res.status} ${res.statusText}`);
@@ -352,9 +536,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const field = request.payload as any;
 
     chrome.storage.local.get(
-      [caseKey(tabId), "lastActiveCaseId", "isPaused", fieldCacheKey(tabId), pageContextKey(tabId)],
+      [
+        caseKey(tabId),
+        "lastActiveCaseId",
+        fieldCacheKey(tabId),
+        pageContextKey(tabId),
+        extSessionKey(tabId),
+      ],
       (res) => {
-        if (res.isPaused) return;
         const caseId = res[caseKey(tabId)] || res.lastActiveCaseId;
         if (!caseId) return;
 
@@ -401,6 +590,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
           headings: context.headings || [],
           mainText: context.mainText || [],
           fields: [field],
+          sessionId: res[extSessionKey(tabId)],
         };
 
         fetchWithAuth(`/cases/${caseId}/muscle/resolve-question`, {
@@ -444,11 +634,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   if (request.type === "CHECK_CONSISTENCY") {
     const tabId = request.tabId;
-    chrome.storage.local.get([caseKey(tabId)], (res) => {
-      const caseId = res[caseKey(tabId)];
+    chrome.storage.local.get(
+      [caseKey(tabId), "lastActiveCaseId", extSessionKey(tabId)],
+      (res) => {
+      const caseId = res[caseKey(tabId)] || res.lastActiveCaseId;
+      if (!caseId) {
+        sendResponse({ success: false, error: "No active case selected for this tab." });
+        return;
+      }
       fetchWithAuth(`/cases/${caseId}/muscle/consistency-check`, {
         method: 'POST',
-        body: JSON.stringify(request.payload)
+        body: JSON.stringify({ ...request.payload, session_id: res[extSessionKey(tabId)] })
       })
       .then(res => res.json())
       .then(data => sendResponse({ success: true, data: data.data }))
@@ -459,11 +655,17 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.type === "SAVE_OVERRIDE") {
     const tabId = request.tabId;
-    chrome.storage.local.get([caseKey(tabId)], (res) => {
-      const caseId = res[caseKey(tabId)];
+    chrome.storage.local.get(
+      [caseKey(tabId), "lastActiveCaseId", extSessionKey(tabId)],
+      (res) => {
+      const caseId = res[caseKey(tabId)] || res.lastActiveCaseId;
+      if (!caseId) {
+        sendResponse({ success: false, error: "No active case selected for this tab." });
+        return;
+      }
       fetchWithAuth(`/cases/${caseId}/muscle/save-override`, {
         method: 'POST',
-        body: JSON.stringify(request.payload)
+        body: JSON.stringify({ ...request.payload, session_id: res[extSessionKey(tabId)] })
       })
       .then(res => res.json())
       .then(() => sendResponse({ success: true }))
@@ -487,8 +689,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "INACTIVITY_THRESHOLD") {
     const tabId = sender.tab?.id;
     if (tabId === undefined) return false;
-    chrome.storage.local.get([caseKey(tabId), "isPaused"], (res) => {
-      if (res.isPaused || !res[caseKey(tabId)]) return;
+    chrome.storage.local.get([caseKey(tabId)], (res) => {
+      if (!res[caseKey(tabId)]) return;
       chrome.storage.local.set({ [sessionKey(tabId)]: "COMPLETION_CONFIRMATION" }, () => {
         chrome.runtime.sendMessage({ type: "SESSION_COMPLETION_PROMPT", tabId }).catch(() => {});
       });
@@ -498,8 +700,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "POSITIVE_COMPLETION_SIGNAL") {
     const tabId = sender.tab?.id;
     if (tabId === undefined) return false;
-    chrome.storage.local.get([caseKey(tabId), "isPaused"], (res) => {
-      if (res.isPaused || !res[caseKey(tabId)]) return;
+    chrome.storage.local.get([caseKey(tabId)], (res) => {
+      if (!res[caseKey(tabId)]) return;
       chrome.storage.local.set({ [sessionKey(tabId)]: "COMPLETION_CONFIRMATION" }, () => {
         chrome.runtime.sendMessage({ type: "SESSION_COMPLETION_PROMPT", tabId }).catch(() => {});
       });

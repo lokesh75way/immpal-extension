@@ -1,14 +1,12 @@
 // Content script injected into external sites and Immpal frontend
 
-let isPaused = false;
-chrome.storage.local.get(["isPaused"], (res) => {
-  if (res.isPaused) isPaused = true;
-});
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.isPaused !== undefined) {
-    isPaused = !!changes.isPaused.newValue;
-  }
-});
+// This script is injected into every page (so it can work on any government
+// portal), but must never scan fields or call the resolution API until the
+// user explicitly activates Copilot for the CURRENT page from the popup.
+// A fresh page load always starts inactive; patchHistoryForSpaDetection()
+// resets it back to inactive on same-document (SPA) navigations too, so
+// activation never silently carries over to a different page.
+let isPageActive = false;
 
 // ---------------------------------------------------------------------------
 // Auth token bridge (Initialized immediately at top level)
@@ -92,6 +90,7 @@ export function cleanFieldLabel(label?: string | null): string {
   if (!label) return "";
   return label
     .replace(/^[\s*•\-–—:]+/, "")
+    .replace(/[\s*•\-–—:]+$/, "")
     .replace(/\s*\((required|optional|obligatoire|facultatif)\)/gi, "")
     .replace(/\s*-\s*Select\s*(year|month|day)/i, " ($1)")
     .replace(/\s{2,}/g, " ")
@@ -100,11 +99,33 @@ export function cleanFieldLabel(label?: string | null): string {
 
 function resolveLabel(el: Element): string {
   const id = el.getAttribute("id");
+  const name = el.getAttribute("name");
+
+  // 1. Explicit label[for="..."] with exact and stripped suffixes
   if (id) {
     const explicit = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-    if (explicit) return explicit.textContent?.trim() ?? "";
+    if (explicit?.textContent?.trim()) return explicit.textContent.trim();
+
+    // Suffix stripping: e.g. "codePassport_select" -> "codePassport", "uci_input" -> "uci"
+    const strippedId = id.replace(/(_select|_input|_txtArea|_txt|_field|_dropdown)$/i, "");
+    if (strippedId && strippedId !== id) {
+      const strippedExplicit = document.querySelector(`label[for="${CSS.escape(strippedId)}"]`);
+      if (strippedExplicit?.textContent?.trim()) return strippedExplicit.textContent.trim();
+    }
   }
 
+  if (name) {
+    const explicitName = document.querySelector(`label[for="${CSS.escape(name)}"]`);
+    if (explicitName?.textContent?.trim()) return explicitName.textContent.trim();
+
+    const strippedName = name.replace(/(_select|_input|_txtArea|_txt|_field|_dropdown)$/i, "");
+    if (strippedName && strippedName !== name) {
+      const strippedExplicit = document.querySelector(`label[for="${CSS.escape(strippedName)}"]`);
+      if (strippedExplicit?.textContent?.trim()) return strippedExplicit.textContent.trim();
+    }
+  }
+
+  // 2. Wrapping label
   const wrappingLabel = el.closest("label");
   if (wrappingLabel) {
     const clone = wrappingLabel.cloneNode(true) as HTMLElement;
@@ -113,6 +134,7 @@ function resolveLabel(el: Element): string {
     if (text) return text;
   }
 
+  // 3. aria-label and aria-labelledby
   const ariaLabel = el.getAttribute("aria-label");
   if (ariaLabel?.trim()) return ariaLabel.trim();
 
@@ -126,43 +148,65 @@ function resolveLabel(el: Element): string {
     if (text) return text;
   }
 
+  // 4. Direct siblings and parent text nodes
   const parent = el.parentElement;
   if (parent) {
     let sibling: Element | null = el.previousElementSibling;
     while (sibling) {
       const text = sibling.textContent?.trim() ?? "";
-      if (text) return text;
+      if (text && text.length < 150) return text;
       sibling = sibling.previousElementSibling;
     }
     for (const node of parent.childNodes) {
       if (node.nodeType === Node.TEXT_NODE) {
         const text = node.textContent?.trim() ?? "";
-        if (text) return text;
+        if (text && text.length < 150) return text;
       }
       if (node === el) break;
     }
   }
 
-  // Check table cells (very common in forms like Roboform)
+  // 5. Check table cells (common in forms)
   const td = el.closest("td");
   if (td) {
     let prevTd = td.previousElementSibling as HTMLElement;
     while (prevTd) {
       const text = prevTd.textContent?.trim();
-      if (text && text.length < 100) return text;
+      if (text && text.length < 150) return text;
       prevTd = prevTd.previousElementSibling as HTMLElement;
     }
   }
 
-  // Check sibling divs (e.g., <div class="label">Name</div> <div><input></div>)
-  const wrapperDiv = el.closest("div");
-  if (wrapperDiv && wrapperDiv.parentElement) {
-    let prevDiv = wrapperDiv.previousElementSibling as HTMLElement;
-    while (prevDiv) {
-      const text = prevDiv.textContent?.trim();
-      if (text && text.length < 100) return text;
-      prevDiv = prevDiv.previousElementSibling as HTMLElement;
+  // 6. Upward hierarchical container search (up to 5 levels)
+  let currentParent = el.parentElement;
+  let depth = 0;
+  while (currentParent && depth < 5 && currentParent !== document.body) {
+    let prev = currentParent.previousElementSibling as HTMLElement | null;
+    while (prev) {
+      if (prev.matches("label, .control-label, .form-label, [class*='label'], [class*='title'], [class*='question'], legend, p, strong")) {
+        const text = prev.textContent?.trim();
+        if (text && text.length > 1 && text.length < 200) return text;
+      }
+      const childLabel = prev.querySelector("label, .control-label, .form-label, [class*='label'], [class*='title'], [class*='question'], legend, p, strong");
+      if (childLabel?.textContent?.trim()) {
+        const text = childLabel.textContent.trim();
+        if (text.length > 1 && text.length < 200) return text;
+      }
+      prev = prev.previousElementSibling as HTMLElement | null;
     }
+
+    const containerLabel = currentParent.querySelector("label, .control-label, .form-label, [class*='label'], [class*='title'], [class*='question'], legend");
+    if (containerLabel && !containerLabel.contains(el) && !el.contains(containerLabel)) {
+      const text = containerLabel.textContent?.trim();
+      if (text && text.length > 1 && text.length < 200) return text;
+    }
+
+    if (currentParent.matches(".form-group, .form-item, fieldset, [class*='question'], [class*='field'], [class*='row']")) {
+      break;
+    }
+
+    currentParent = currentParent.parentElement;
+    depth++;
   }
 
   const title = el.getAttribute("title");
@@ -298,18 +342,29 @@ function extractSelectField(el: HTMLSelectElement, index: number): ExtractedFiel
   const fieldKey = id || name || `select_${index}`;
   el.setAttribute("data-immpal-key", fieldKey);
   
-  let label = resolveLabel(el);
+  let label = cleanFieldLabel(resolveLabel(el));
   const fieldset = el.closest("fieldset");
   const legend = fieldset?.querySelector("legend");
-  if (legend && legend.textContent?.trim() && !label.toLowerCase().includes(legend.textContent.trim().toLowerCase())) {
-    label = `${legend.textContent.trim()} - ${label}`;
+  if (legend && legend.textContent?.trim()) {
+    const legText = cleanFieldLabel(legend.textContent);
+    if (!label) {
+      label = legText;
+    } else if (!label.toLowerCase().includes(legText.toLowerCase())) {
+      label = `${legText} - ${label}`;
+    }
   } else {
-    const container = el.closest(".form-group, .question, [class*='question'], [class*='date'], [class*='field']");
-    const heading = container?.querySelector("legend, h2, h3, h4, p, [class*='label'], [class*='title']");
-    if (heading && heading !== el.closest("label") && heading.textContent?.trim() && !label.toLowerCase().includes(heading.textContent.trim().toLowerCase())) {
-      label = `${heading.textContent.trim()} - ${label}`;
+    const container = el.closest(".form-group, .question, [class*='question'], [class*='date'], [class*='field'], [class*='row']");
+    const heading = container?.querySelector("legend, h2, h3, h4, p, label, [class*='label'], [class*='title']");
+    if (heading && heading !== el.closest("label") && heading.textContent?.trim()) {
+      const headText = cleanFieldLabel(heading.textContent);
+      if (!label) {
+        label = headText;
+      } else if (!label.toLowerCase().includes(headText.toLowerCase())) {
+        label = `${headText} - ${label}`;
+      }
     }
   }
+  label = cleanFieldLabel(label);
 
   const options = Array.from(el.options)
     .filter((o) => o.value !== "")
@@ -502,6 +557,15 @@ function highlightField(el: HTMLElement) {
   highlightedEl = targetToHighlight;
 }
 
+function clearCurrentHighlight() {
+  if (highlightedEl) {
+    highlightedEl.style.outline = "";
+    highlightedEl.style.outlineOffset = "";
+    highlightedEl.style.boxShadow = "";
+    highlightedEl = null;
+  }
+}
+
 /** Visual feedback animation when an element is automatically filled by Immpal */
 function flashFilledFeedback(el: HTMLElement) {
   const originalOutline = el.style.outline;
@@ -541,6 +605,32 @@ function buildPageContext(fields: ExtractedField[]): PageContext {
   };
 }
 
+// Track active assist mode so Autofill mode stays quiet and does not make
+// duplicate background LLM calls or hijack focus until Focus Assist is enabled.
+let currentAssistMode: "autofill" | "focus" = "autofill";
+
+chrome.storage.local.get(["assistMode"], (res) => {
+  if (res.assistMode === "focus" || res.assistMode === "autofill") {
+    currentAssistMode = res.assistMode;
+  }
+});
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.assistMode) {
+    const newMode = changes.assistMode.newValue;
+    if (newMode === "focus" || newMode === "autofill") {
+      const prevMode = currentAssistMode;
+      currentAssistMode = newMode;
+      if (newMode === "focus" && prevMode !== "focus") {
+        onPageMayHaveChanged();
+      } else if (newMode === "autofill") {
+        cancelAutoAdvance();
+        clearCurrentHighlight();
+      }
+    }
+  }
+});
+
 // Keys already sent for resolution (or currently in flight) -- so re-running
 // extraction on every mutation only ever resolves genuinely new fields instead
 // of re-sending the whole form (and a fresh backend/LLM call) every time.
@@ -568,15 +658,30 @@ function resolveNewFields(fields: ExtractedField[]) {
   noteActivity();
 }
 
+/** Whether any OTHER extractable field exists on the page after this one, in
+ *  document order -- lets the panel hide "Next Question" on the page's last
+ *  field and point the user at the portal's own Save/Continue button instead. */
+function hasFieldAfter(fieldKey: string): boolean {
+  const allFields = extractAllFields();
+  const idx = allFields.findIndex((f) => f.fieldKey === fieldKey);
+  return idx !== -1 && idx < allFields.length - 1;
+}
+
 function onFieldFocused(target: HTMLElement) {
-  if (isPaused) return;
+  if (!isPageActive) return;
+  // In Autofill mode, do not trigger interactive field-focus inspection
+  if (currentAssistMode !== "focus") return;
+
   const field = extractField(target);
   if (!field) return;
   highlightField(target);
   // Covers a field that appeared after the last batch was sent (e.g. focused
   // immediately after being dynamically rendered, before the mutation observer fired).
   resolveNewFields(extractAllFields());
-  safeSendMessage({ type: "FIELD_FOCUSED", payload: field });
+  safeSendMessage({
+    type: "FIELD_FOCUSED",
+    payload: { ...field, hasNextField: hasFieldAfter(field.fieldKey) },
+  });
   noteActivity();
 }
 
@@ -586,12 +691,18 @@ let lastAutoFieldKey: string | null = null;
 
 /** Automatic reaction to page changes (no focus event required) -- fires when the rendered page's fields change. */
 function onPageMayHaveChanged() {
-  if (isPaused) return;
+  if (!isPageActive) return;
   const allFields = extractAllFields();
   if (allFields.length === 0) {
     checkForCompletionSignal();
     return;
   }
+  // In Autofill mode, stay quiet: do not pre-resolve or steal focus in background.
+  // Wait until the user runs Autofill or switches to Focus Assist.
+  if (currentAssistMode !== "focus") {
+    return;
+  }
+
   resolveNewFields(allFields);
 
   // Surface the first fillable field automatically so the panel isn't empty
@@ -602,7 +713,10 @@ function onPageMayHaveChanged() {
   if (!field || field.fieldKey === lastAutoFieldKey) return;
   lastAutoFieldKey = field.fieldKey;
   highlightField(target);
-  safeSendMessage({ type: "FIELD_FOCUSED", payload: field });
+  safeSendMessage({
+    type: "FIELD_FOCUSED",
+    payload: { ...field, hasNextField: hasFieldAfter(field.fieldKey) },
+  });
 }
 
 let autoAdvanceTimer: number | null = null;
@@ -643,7 +757,7 @@ document.body.addEventListener('focusin', (e) => {
 
 // 2. Listen for clicks anywhere on/near question headings, legends, labels, or options
 document.body.addEventListener('click', (e) => {
-  if (isPaused) return;
+  if (!isPageActive) return;
   const target = e.target as HTMLElement;
   if (!target) return;
 
@@ -652,8 +766,8 @@ document.body.addEventListener('click', (e) => {
     if (timeoutId) clearTimeout(timeoutId);
     timeoutId = window.setTimeout(() => onFieldFocused(input), 150);
 
-    // If clicked on or near a radio button, schedule smooth auto-advance
-    if (input.tagName.toLowerCase() === 'input' && (input as HTMLInputElement).type === 'radio') {
+    // If clicked on or near a radio button, schedule smooth auto-advance (only in Focus Assist mode)
+    if (currentAssistMode === "focus" && input.tagName.toLowerCase() === 'input' && (input as HTMLInputElement).type === 'radio') {
       window.setTimeout(() => {
         if ((input as HTMLInputElement).checked) {
           scheduleAutoAdvance(input, 750);
@@ -669,15 +783,15 @@ document.body.addEventListener('click', (e) => {
 
 // 3. Listen for change events on inputs (e.g. toggling a radio button or dropdown)
 document.body.addEventListener('change', (e) => {
-  if (isPaused) return;
+  if (!isPageActive) return;
   const target = e.target as HTMLElement;
   const tagName = target?.tagName?.toLowerCase();
   if (['input', 'select', 'textarea'].includes(tagName)) {
     if (timeoutId) clearTimeout(timeoutId);
     timeoutId = window.setTimeout(() => onFieldFocused(target), 150);
 
-    // When a radio is selected via keyboard or native change, auto-advance
-    if (tagName === 'input' && (target as HTMLInputElement).type === 'radio' && (target as HTMLInputElement).checked) {
+    // When a radio is selected via keyboard or native change, auto-advance (only in Focus Assist mode)
+    if (currentAssistMode === "focus" && tagName === 'input' && (target as HTMLInputElement).type === 'radio' && (target as HTMLInputElement).checked) {
       scheduleAutoAdvance(target, 750);
     }
   }
@@ -704,7 +818,12 @@ function patchHistoryForSpaDetection() {
   const fire = () => {
     knownFieldKeys.clear();
     lastAutoFieldKey = null;
-    safeSendMessage({ type: "PAGE_NAVIGATED" });
+    // A same-document (SPA) navigation doesn't destroy this script's JS
+    // context the way a real page load does, so activation must be reset
+    // here explicitly -- otherwise it would silently carry over to whatever
+    // the URL changed to next.
+    isPageActive = false;
+    safeSendMessage({ type: "PAGE_NAVIGATED", payload: { url: window.location.href } });
     window.setTimeout(onPageMayHaveChanged, 300);
   };
   const origPush = history.pushState.bind(history);
@@ -735,11 +854,28 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
   if (request.type === "RECHECK_PAGE") {
     // Force a resend of every field currently on the page -- fields extracted
-    // before a case was active were never actually sent to the backend.
+    // before a case was active were never actually sent to the backend. A
+    // no-op if the user hasn't activated Copilot on this page yet.
     knownFieldKeys.clear();
     lastAutoFieldKey = null;
     onPageMayHaveChanged();
     sendResponse({ status: "rechecking" });
+    return true;
+  }
+  if (request.type === "PAGE_ACTIVATED") {
+    isPageActive = true;
+    // Force an immediate scan rather than waiting for the next focus/mutation
+    // event, so activating shows results right away.
+    knownFieldKeys.clear();
+    lastAutoFieldKey = null;
+    onPageMayHaveChanged();
+    sendResponse({ status: "activated" });
+    return true;
+  }
+  if (request.type === "PAGE_DEACTIVATED") {
+    isPageActive = false;
+    cancelAutoAdvance();
+    sendResponse({ status: "deactivated" });
     return true;
   }
 });
@@ -1183,6 +1319,10 @@ function advanceToNextField(currentElOrKey?: HTMLElement | string) {
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (request.type === "AUTOFILL_FORM") {
+    if (!isPageActive) {
+      sendResponse({ status: "error", message: "Activate Immpal on this page first." });
+      return false;
+    }
     runMultiPassAutofill(request.payload.caseId, request.payload.options).then(sendResponse);
     return true; // async response
   }
@@ -1194,11 +1334,24 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request.type === "FOCUS_FIELD" && request.fieldKey) {
+    currentAssistMode = "focus";
     const el = document.querySelector(`[data-immpal-key="${CSS.escape(request.fieldKey)}"]`) as HTMLElement | null;
     if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.focus();
-      flashFilledFeedback(el);
+      const container = el.closest(
+        'fieldset, [role="radiogroup"], mat-radio-group, .form-group, [class*="question"], [class*="field"]'
+      ) as HTMLElement | null;
+      const scrollTarget = container || el;
+      scrollTarget.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.focus({ preventScroll: true });
+      highlightField(el);
+      resolveNewFields(extractAllFields());
+      const field = extractField(el);
+      if (field) {
+        safeSendMessage({
+          type: "FIELD_FOCUSED",
+          payload: { ...field, hasNextField: hasFieldAfter(field.fieldKey) },
+        });
+      }
       sendResponse({ success: true });
     } else {
       sendResponse({ success: false });

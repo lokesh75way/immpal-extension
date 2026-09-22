@@ -113,6 +113,12 @@ export const theme = createTheme({
           '&:active': {
             transform: 'translateY(0)',
           },
+          '&.Mui-disabled': {
+            color: '#94A3B8',
+            backgroundColor: '#E2E8F0',
+            background: '#E2E8F0',
+            boxShadow: 'none',
+          },
         },
         outlined: {
           borderColor: '#CBD5E1',
@@ -123,12 +129,20 @@ export const theme = createTheme({
             borderColor: '#94A3B8',
             color: BRAND_PRIMARY,
           },
+          '&.Mui-disabled': {
+            color: '#94A3B8',
+            borderColor: '#E2E8F0',
+            backgroundColor: '#F8FAFC',
+          },
         },
         text: {
           color: '#475569',
           '&:hover': {
             color: BRAND_PRIMARY,
             backgroundColor: 'transparent',
+          },
+          '&.Mui-disabled': {
+            color: '#94A3B8',
           },
         },
       },
@@ -143,6 +157,12 @@ export const theme = createTheme({
               background: `linear-gradient(135deg, ${BRAND_LIGHT} 0%, ${BRAND_PRIMARY} 100%)`,
               boxShadow: '0 4px 12px rgba(37, 99, 235, 0.35)',
             },
+            '&.Mui-disabled': {
+              color: '#94A3B8',
+              background: '#E2E8F0',
+              backgroundColor: '#E2E8F0',
+              boxShadow: 'none',
+            },
           },
         },
         {
@@ -154,6 +174,12 @@ export const theme = createTheme({
             '&:hover': {
               background: 'linear-gradient(135deg, #34D399 0%, #10B981 100%)',
               boxShadow: '0 4px 12px rgba(16, 185, 129, 0.35)',
+            },
+            '&.Mui-disabled': {
+              color: '#94A3B8',
+              background: '#E2E8F0',
+              backgroundColor: '#E2E8F0',
+              boxShadow: 'none',
             },
           },
         },
@@ -167,6 +193,12 @@ export const theme = createTheme({
               background: 'linear-gradient(135deg, #14B8A6 0%, #0F766E 100%)',
               boxShadow: '0 4px 12px rgba(15, 118, 110, 0.35)',
             },
+            '&.Mui-disabled': {
+              color: '#94A3B8',
+              background: '#E2E8F0',
+              backgroundColor: '#E2E8F0',
+              boxShadow: 'none',
+            },
           },
         },
         {
@@ -178,6 +210,12 @@ export const theme = createTheme({
             '&:hover': {
               background: 'linear-gradient(135deg, #F87171 0%, #EF4444 100%)',
               boxShadow: '0 4px 12px rgba(239, 68, 68, 0.35)',
+            },
+            '&.Mui-disabled': {
+              color: '#94A3B8',
+              background: '#E2E8F0',
+              backgroundColor: '#E2E8F0',
+              boxShadow: 'none',
             },
           },
         },

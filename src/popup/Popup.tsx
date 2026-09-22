@@ -1,7 +1,44 @@
-import { useEffect, useRef, useState } from 'react';
-import { Box, Button, Typography, IconButton, Tooltip, TextField, CircularProgress, Switch, FormControlLabel } from '@mui/material';
-import { Logout as LogoutIcon, Clear as ClearIcon } from '@mui/icons-material';
-import { CaseSelector } from './CaseSelector';
+import { useEffect, useRef, useState } from "react";
+import {
+  Box,
+  Button,
+  Typography,
+  IconButton,
+  Tooltip,
+  TextField,
+  CircularProgress,
+  ToggleButton,
+  ToggleButtonGroup,
+  Paper,
+  Chip,
+  Divider,
+  Fade,
+} from "@mui/material";
+import {
+  Logout as LogoutIcon,
+  Clear as ClearIcon,
+  ContentCopyOutlined as CopyIcon,
+  Check as CheckIcon,
+  CenterFocusStrongOutlined as FocusModeIcon,
+  Bolt as AutofillModeIcon,
+  CheckCircle as AnswerIcon,
+  AutoAwesome as NarrativeIcon,
+  HelpOutlined as ClarificationIcon,
+  InfoOutlined as MissingIcon,
+  InsertDriveFileOutlined as DocumentIcon,
+  FormatListBulleted as MultipleIcon,
+  ErrorOutlined as ErrorIcon,
+  EditOutlined as ManualAnswerIcon,
+  Refresh as RefreshIcon,
+  VerifiedUserOutlined as ShieldIcon,
+  ArrowForward as ArrowIcon,
+  LockOutlined as LockIcon,
+} from "@mui/icons-material";
+import { CaseSelector } from "./CaseSelector";
+import { BRAND_PRIMARY } from "../theme";
+import immpalLogo from "../assets/immpal-logo.png";
+
+type AssistMode = "focus" | "autofill";
 
 interface ResolvedQuestionPayload {
   question: {
@@ -23,162 +60,510 @@ interface ResolvedQuestionPayload {
   };
 }
 
-const Popup = () => {
+const STATUS_META: Record<
+  string,
+  {
+    label: string;
+    bg: string;
+    fg: string;
+    border: string;
+    icon: React.ReactElement;
+  }
+> = {
+  ANSWER_AVAILABLE: {
+    label: "Verified Answer Found",
+    bg: "#ECFDF5",
+    fg: "#059669",
+    border: "#A7F3D0",
+    icon: <AnswerIcon sx={{ fontSize: 16, color: "#059669" }} />,
+  },
+  SUGGESTED_NARRATIVE: {
+    label: "Suggested Narrative",
+    bg: "#EFF6FF",
+    fg: "#2563EB",
+    border: "#BFDBFE",
+    icon: <NarrativeIcon sx={{ fontSize: 16, color: "#2563EB" }} />,
+  },
+  CLARIFICATION_REQUIRED: {
+    label: "Clarification Needed",
+    bg: "#FFFBEB",
+    fg: "#D97706",
+    border: "#FDE68A",
+    icon: <ClarificationIcon sx={{ fontSize: 16, color: "#D97706" }} />,
+  },
+  INFORMATION_MISSING: {
+    label: "Information Missing",
+    bg: "#F8FAFC",
+    fg: "#64748B",
+    border: "#E2E8F0",
+    icon: <MissingIcon sx={{ fontSize: 16, color: "#64748B" }} />,
+  },
+  DOCUMENT_REQUIRED: {
+    label: "Document Required",
+    bg: "#F0FDFA",
+    fg: "#0D9488",
+    border: "#99F6E4",
+    icon: <DocumentIcon sx={{ fontSize: 16, color: "#0D9488" }} />,
+  },
+  MULTIPLE_POSSIBLE_FACTS: {
+    label: "Multiple Matches",
+    bg: "#F5F3FF",
+    fg: "#7C3AED",
+    border: "#DDD6FE",
+    icon: <MultipleIcon sx={{ fontSize: 16, color: "#7C3AED" }} />,
+  },
+  ERROR: {
+    label: "Resolution Notice",
+    bg: "#FEF2F2",
+    fg: "#DC2626",
+    border: "#FECACA",
+    icon: <ErrorIcon sx={{ fontSize: 16, color: "#DC2626" }} />,
+  },
+};
+
+export interface AutofillSummaryItem {
+  key: string;
+  label: string;
+  value?: string;
+  reason?: string;
+}
+
+export interface AutofillSummaryReport {
+  filledCount: number;
+  skippedCount: number;
+  totalCount: number;
+  filledItems: AutofillSummaryItem[];
+  skippedItems: AutofillSummaryItem[];
+}
+
+export const cleanFieldLabel = (raw?: string | null): string => {
+  if (!raw) return "";
+  return raw
+    .replace(/^[\s*•\-–—:]+/, "")
+    .replace(/\s*\((required|optional|obligatoire|facultatif)\)/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+};
+
+export const Popup = () => {
   const [token, setToken] = useState<string | null>(null);
   const [currentTabId, setCurrentTabId] = useState<number | null>(null);
   const [selectedCaseId, setSelectedCaseId] = useState<string | null>(null);
   const [isPaused, setIsPaused] = useState(false);
+  const [assistMode, setAssistMode] = useState<AssistMode>("autofill"); // Default to Autofill for portal workflows
 
-  const [resolutionData, setResolutionData] = useState<ResolvedQuestionPayload | null>(null);
+  // Autofill mode state
+  const [autofillStatus, setAutofillStatus] = useState<{
+    type: "success" | "error" | "info";
+    message: string;
+  } | null>(null);
+  const [autofillResult, setAutofillResult] =
+    useState<AutofillSummaryReport | null>(null);
+  const [showFilledList, setShowFilledList] = useState(false);
+
+  const [resolutionData, setResolutionData] =
+    useState<ResolvedQuestionPayload | null>(null);
   const [copySuccess, setCopySuccess] = useState<string | null>(null);
+  const [insertSuccess, setInsertSuccess] = useState(false);
 
   // Manual Override State
   const [showManualInput, setShowManualInput] = useState(false);
   const [manualAnswer, setManualAnswer] = useState("");
   const [isChecking, setIsChecking] = useState(false);
-  const [consistencyResult, setConsistencyResult] = useState<{ status: string, rationale?: string } | null>(null);
+  const [consistencyResult, setConsistencyResult] = useState<{
+    status: string;
+    rationale?: string;
+  } | null>(null);
   const [isSaved, setIsSaved] = useState(false);
-
-  // Clarification response (distinct from "I'll answer this myself")
-  const [clarificationAnswer, setClarificationAnswer] = useState("");
 
   // Session completion confirmation
   const [showCompletionPrompt, setShowCompletionPrompt] = useState(false);
 
-  const checkToken = () => {
-    chrome.storage.local.get("immpalAuthToken", (result) => {
-      setToken((result.immpalAuthToken as string) || null);
-    });
-  };
+  const currentTabIdRef = useRef<number | null>(null);
+  const previousCaseIdRef = useRef<string | null>(null);
 
   useEffect(() => {
+    currentTabIdRef.current = currentTabId;
+  }, [currentTabId]);
+
+  useEffect(() => {
+    const checkToken = () => {
+      chrome.storage.local.get(["immpalAuthToken"], (result) => {
+        setToken(
+          typeof result.immpalAuthToken === "string"
+            ? result.immpalAuthToken
+            : null,
+        );
+      });
+    };
+
     checkToken();
 
-    // Every message and stored value is scoped to the tab this panel is
-    // currently showing -- resolve it once up front so selecting a case (or
-    // anything detected) never leaks into or gets overwritten by another tab.
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const tabId = tabs[0]?.id;
       if (tabId === undefined) return;
       setCurrentTabId(tabId);
 
-      chrome.runtime.sendMessage({ type: "GET_ACTIVE_CASE", tabId }, (response) => {
-        if (response?.caseId) setSelectedCaseId(response.caseId);
-      });
+      // Verify and re-inject content script if missing or disconnected
+      chrome.runtime.sendMessage({ type: "ENSURE_CONTENT_SCRIPT", tabId });
 
-      chrome.runtime.sendMessage({ type: "GET_LAST_RESOLUTION", tabId }, (response) => {
-        if (response && response.data) setResolutionData(response.data);
-      });
+      chrome.runtime.sendMessage(
+        { type: "GET_ACTIVE_CASE", tabId },
+        (response) => {
+          if (response?.caseId) {
+            previousCaseIdRef.current = response.caseId;
+            setSelectedCaseId(response.caseId);
+          }
+        },
+      );
 
-      chrome.runtime.sendMessage({ type: "GET_SESSION_STATE", tabId }, (response) => {
-        setShowCompletionPrompt(response?.sessionState === "COMPLETION_CONFIRMATION");
+      chrome.runtime.sendMessage(
+        { type: "GET_LAST_RESOLUTION", tabId },
+        (response) => {
+          if (response && response.data) setResolutionData(response.data);
+        },
+      );
+
+      chrome.runtime.sendMessage(
+        { type: "GET_SESSION_STATE", tabId },
+        (response) => {
+          setShowCompletionPrompt(
+            response?.sessionState === "COMPLETION_CONFIRMATION",
+          );
+        },
+      );
+
+      chrome.storage.local.get([`autofillResult_${tabId}`], (res) => {
+        if (res && res[`autofillResult_${tabId}`]) {
+          setAutofillResult(
+            res[`autofillResult_${tabId}`] as AutofillSummaryReport,
+          );
+        }
       });
     });
 
     const listener = (request: any) => {
-      if (request.type === "TOKEN_UPDATED") {
+      if (
+        request.type === "AUTH_STATE_CHANGED" ||
+        request.type === "TOKEN_UPDATED"
+      ) {
         checkToken();
       } else if (
-        (request.type === "QUESTION_RESOLVED" || request.type === "QUESTION_DETECTED") &&
-        request.payload &&
-        request.tabId === currentTabIdRef.current
+        (request.type === "QUESTION_RESOLVED" ||
+          request.type === "QUESTION_DETECTED") &&
+        request.payload
       ) {
-        setResolutionData(request.payload);
-        setCopySuccess(null);
-        setShowManualInput(false);
-        setManualAnswer("");
-        setClarificationAnswer("");
-        setConsistencyResult(null);
-        setIsSaved(false);
-        setShowCompletionPrompt(false);
-      } else if (request.type === "SESSION_COMPLETION_PROMPT" && request.tabId === currentTabIdRef.current) {
+        const curTab = currentTabIdRef.current;
+        if (!curTab || request.tabId === curTab) {
+          if (!curTab && request.tabId) {
+            setCurrentTabId(request.tabId);
+            currentTabIdRef.current = request.tabId;
+          }
+          setResolutionData(request.payload);
+          setCopySuccess(null);
+          setShowManualInput(false);
+          setManualAnswer("");
+          setConsistencyResult(null);
+          setIsSaved(false);
+          setShowCompletionPrompt(false);
+        }
+      } else if (
+        request.type === "PAGE_NAVIGATED" &&
+        (!currentTabIdRef.current || request.tabId === currentTabIdRef.current)
+      ) {
+        setAutofillResult(null);
+        setResolutionData(null);
+      } else if (
+        request.type === "SESSION_COMPLETION_PROMPT" &&
+        (!currentTabIdRef.current || request.tabId === currentTabIdRef.current)
+      ) {
         setShowCompletionPrompt(true);
       }
     };
+
     chrome.runtime.onMessage.addListener(listener);
 
-    // Get pause state
+    const storageListener = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      areaName: string,
+    ) => {
+      if (areaName === "local") {
+        if (changes.immpalAuthToken) {
+          const val = changes.immpalAuthToken.newValue;
+          setToken(typeof val === "string" ? val : null);
+        }
+        const curTab = currentTabIdRef.current;
+        if (curTab && changes[`lastResolution_${curTab}`]) {
+          const newRes = changes[`lastResolution_${curTab}`].newValue;
+          if (newRes) {
+            setResolutionData(newRes as ResolvedQuestionPayload);
+          }
+        }
+      }
+    };
+    chrome.storage.onChanged.addListener(storageListener);
+
+    const tabActivatedListener = (activeInfo: { tabId: number; windowId: number }) => {
+      const newTabId = activeInfo.tabId;
+      setCurrentTabId(newTabId);
+      currentTabIdRef.current = newTabId;
+
+      chrome.runtime.sendMessage({ type: "ENSURE_CONTENT_SCRIPT", tabId: newTabId });
+
+      chrome.runtime.sendMessage(
+        { type: "GET_ACTIVE_CASE", tabId: newTabId },
+        (response) => {
+          if (response?.caseId) {
+            previousCaseIdRef.current = response.caseId;
+            setSelectedCaseId(response.caseId);
+          }
+        },
+      );
+
+      chrome.runtime.sendMessage(
+        { type: "GET_LAST_RESOLUTION", tabId: newTabId },
+        (response) => {
+          if (response && response.data) {
+            setResolutionData(response.data);
+          } else {
+            setResolutionData(null);
+          }
+        },
+      );
+    };
+    chrome.tabs.onActivated.addListener(tabActivatedListener);
+
     chrome.storage.local.get(["isPaused"], (res) => {
-      setIsPaused(!!res.isPaused);
+      if (res.isPaused !== undefined) setIsPaused(Boolean(res.isPaused));
     });
 
-    return () => chrome.runtime.onMessage.removeListener(listener);
+    chrome.storage.local.get(["assistMode"], (res) => {
+      if (res.assistMode) {
+        setAssistMode(res.assistMode === "focus" ? "focus" : "autofill");
+      }
+    });
+
+    return () => {
+      chrome.runtime.onMessage.removeListener(listener);
+      chrome.storage.onChanged.removeListener(storageListener);
+      chrome.tabs.onActivated.removeListener(tabActivatedListener);
+    };
   }, []);
 
-  // The message listener above is registered once on mount (before
-  // currentTabId is known), so it reads the latest tab id via a ref rather
-  // than closing over a stale null.
-  const currentTabIdRef = useRef<number | null>(null);
   useEffect(() => {
-    currentTabIdRef.current = currentTabId;
-  }, [currentTabId]);
+    if (!currentTabId || !selectedCaseId) return;
 
-  // Update active case in background script when user selects one; clear all
-  // session state (including stale completion prompts) whenever the case
-  // actually changes or is cleared -- session state must never outlive its
-  // case. Skips the initial mount so it doesn't race the mount-time restore
-  // of a still-valid lastResolution/sessionState above.
-  const hasMountedRef = useRef(false);
-  useEffect(() => {
-    if (currentTabId === null) return;
-    if (!hasMountedRef.current) {
-      hasMountedRef.current = true;
-      if (selectedCaseId) {
-        chrome.runtime.sendMessage({ type: "SET_ACTIVE_CASE", caseId: selectedCaseId, tabId: currentTabId });
-      }
+    // First time selectedCaseId is loaded on popup mount:
+    if (previousCaseIdRef.current === null) {
+      previousCaseIdRef.current = selectedCaseId;
+      chrome.runtime.sendMessage({
+        type: "SET_ACTIVE_CASE",
+        caseId: selectedCaseId,
+        tabId: currentTabId,
+      });
       return;
     }
-    setResolutionData(null);
-    setShowCompletionPrompt(false);
-    chrome.storage.local.remove([`lastResolution_${currentTabId}`, `sessionState_${currentTabId}`]);
-    if (selectedCaseId) {
-      chrome.runtime.sendMessage({ type: "SET_ACTIVE_CASE", caseId: selectedCaseId, tabId: currentTabId });
+
+    // Same case ID already active on this tab:
+    if (previousCaseIdRef.current === selectedCaseId) {
+      return;
     }
+
+    // User explicitly changed to a different case in the UI:
+    previousCaseIdRef.current = selectedCaseId;
+    setResolutionData(null);
+    setAutofillResult(null);
+    setCopySuccess(null);
+    setShowManualInput(false);
+    setManualAnswer("");
+    setConsistencyResult(null);
+    setIsSaved(false);
+    setShowCompletionPrompt(false);
+    chrome.storage.local.remove([
+      `lastResolution_${currentTabId}`,
+      `sessionState_${currentTabId}`,
+      `autofillResult_${currentTabId}`,
+    ]);
+    chrome.runtime.sendMessage({
+      type: "SET_ACTIVE_CASE",
+      caseId: selectedCaseId,
+      tabId: currentTabId,
+    });
   }, [selectedCaseId, currentTabId]);
 
-  const handleTogglePause = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = !e.target.checked; // checked means Active, so isPaused is false
+  const handleTogglePause = () => {
+    const val = !isPaused;
     setIsPaused(val);
     chrome.storage.local.set({ isPaused: val });
   };
 
-  const handleClearQuestion = () => {
-    setResolutionData(null);
-    chrome.storage.local.remove(["lastResolution"]);
+  const handleAssistModeChange = (
+    _: React.MouseEvent<HTMLElement>,
+    newMode: AssistMode | null,
+  ) => {
+    if (!newMode || newMode === assistMode) return;
+    setAssistMode(newMode);
+    setAutofillStatus(null);
+    chrome.storage.local.set({ assistMode: newMode });
   };
 
-  const handleEndSession = () => {
-    chrome.storage.local.remove(
-      ["activeCopilotCaseId", "lastResolution", "sessionState"],
+  const handleAccept = async (answer: string, fieldKey?: string) => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    const targetKey =
+      fieldKey || resolutionData?.question?.fields?.[0]?.fieldKey;
+    if (tab && tab.id && targetKey) {
+      setInsertSuccess(true);
+      setTimeout(() => setInsertSuccess(false), 2000);
+      chrome.tabs.sendMessage(
+        tab.id,
+        { type: "WRITE_FIELD_VALUE", fieldKey: targetKey, value: answer },
+        () => {
+          handleCopy(answer);
+        },
+      );
+    } else {
+      handleCopy(answer);
+    }
+  };
+
+  const handleAdvanceNextField = async () => {
+    let tabId = currentTabId;
+    if (!tabId) {
+      const [tab] = await chrome.tabs.query({
+        active: true,
+        currentWindow: true,
+      });
+      tabId = tab?.id ?? null;
+    }
+    if (!tabId) return;
+
+    const targetKey =
+      resolutionData?.question?.fields?.[0]?.fieldKey ||
+      (resolutionData as any)?.fieldKey;
+
+    chrome.tabs.sendMessage(
+      tabId,
+      { type: "ADVANCE_NEXT_FIELD", fieldKey: targetKey },
       () => {
-        setSelectedCaseId(null);
-        setResolutionData(null);
-        setCopySuccess(null);
-        setShowManualInput(false);
-        setManualAnswer("");
-        setClarificationAnswer("");
-        setConsistencyResult(null);
-        setIsSaved(false);
-        setShowCompletionPrompt(false);
+        if (chrome.runtime.lastError) {
+          console.warn("Could not advance to next field:", chrome.runtime.lastError.message);
+        }
       }
     );
   };
 
-  const handleSignOut = () => {
-    chrome.storage.local.remove(["immpalAuthToken", "immpalRefreshToken"], () => {
-      setToken(null);
+  const handleStartAutofill = async (onlyEmpty = false) => {
+    if (!selectedCaseId) return;
+
+    setAutofillStatus({
+      type: "info",
+      message: onlyEmpty
+        ? "Filling remaining fields…"
+        : "Scanning portal and filling fields…",
     });
+
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+
+    if (tab && tab.id) {
+      chrome.tabs.sendMessage(
+        tab.id,
+        {
+          type: "AUTOFILL_FORM",
+          payload: { caseId: selectedCaseId, options: { onlyEmpty } },
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.error(
+              "Could not send message to active tab.",
+              chrome.runtime.lastError,
+            );
+            setAutofillStatus({
+              type: "error",
+              message:
+                "Could not connect to webpage. Please refresh the page (Cmd+R or F5) and try again.",
+            });
+            setTimeout(() => setAutofillStatus(null), 4000);
+          } else if (response && response.status === "error") {
+            setAutofillStatus({
+              type: "error",
+              message: response.message || "Failed to autofill",
+            });
+            setTimeout(() => setAutofillStatus(null), 4000);
+          } else {
+            setAutofillStatus({
+              type: "success",
+              message: response?.message || "Form autofill complete!",
+            });
+            if (response?.summary) {
+              setAutofillResult(response.summary);
+              chrome.storage.local.set({
+                [`autofillResult_${tab.id}`]: response.summary,
+              });
+            }
+            setTimeout(() => setAutofillStatus(null), 4000);
+          }
+        },
+      );
+    } else {
+      setAutofillStatus({ type: "error", message: "No active tab found." });
+      setTimeout(() => setAutofillStatus(null), 4000);
+    }
+  };
+
+  const handleJumpToField = async (fieldKey: string) => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (tab && tab.id) {
+      chrome.tabs.sendMessage(tab.id, { type: "FOCUS_FIELD", fieldKey });
+    }
+  };
+
+  const handleReloadActiveTab = async () => {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true,
+    });
+    if (tab && tab.id) {
+      chrome.tabs.reload(tab.id, {}, () => {
+        setAutofillStatus({
+          type: "info",
+          message: "Page refreshed! Click Start Auto-fill when loaded.",
+        });
+        setTimeout(() => setAutofillStatus(null), 3000);
+      });
+    }
+  };
+
+  const handleClearQuestion = () => {
+    setResolutionData(null);
+    chrome.storage.local.remove([`lastResolution_${currentTabId}`]);
+  };
+
+  const handleSignOut = () => {
+    chrome.storage.local.remove(
+      ["immpalAuthToken", "immpalRefreshToken"],
+      () => {
+        setToken(null);
+      },
+    );
   };
 
   const handleCopy = async (textToCopy?: string) => {
-    const text = textToCopy || resolutionData?.resolution?.answer;
-    if (!text) return;
+    if (!textToCopy) return;
     try {
-      await navigator.clipboard.writeText(text);
-      setCopySuccess(text);
-      setTimeout(() => setCopySuccess(null), 2000);
+      await navigator.clipboard.writeText(textToCopy);
+      setCopySuccess(textToCopy);
+      setTimeout(() => setCopySuccess(null), 2500);
     } catch (err) {
-      console.error("Failed to copy", err);
+      console.error("Failed to copy:", err);
     }
   };
 
@@ -186,315 +571,2027 @@ const Popup = () => {
     if (!manualAnswer || !resolutionData?.question?.fields?.length) return;
     setIsChecking(true);
     setConsistencyResult(null);
-    
-    const fieldKey = resolutionData.question.fields[0].label || resolutionData.question.fields[0].placeholder || resolutionData.question.fields[0].name;
 
-    chrome.runtime.sendMessage({
-      type: "CHECK_CONSISTENCY",
-      payload: { field_key: fieldKey, user_answer: manualAnswer }
-    }, (response) => {
-      setIsChecking(false);
-      if (response?.success && response.data) {
-        setConsistencyResult(response.data);
-      } else {
-        setConsistencyResult({ status: "ERROR", rationale: response?.error || "Unknown error" });
-      }
-    });
+    const fieldKey =
+      resolutionData.question.fields[0].fieldKey ||
+      resolutionData.question.fields[0].name;
+
+    chrome.runtime.sendMessage(
+      {
+        type: "CHECK_CONSISTENCY",
+        tabId: currentTabId,
+        payload: { field_key: fieldKey, user_answer: manualAnswer },
+      },
+      (response) => {
+        setIsChecking(false);
+        if (response?.success && response.data) {
+          setConsistencyResult(response.data);
+        } else {
+          setConsistencyResult({
+            status: "ERROR",
+            rationale: response?.error || "Unknown error",
+          });
+        }
+      },
+    );
   };
 
   const handleSaveOverride = () => {
-    if (!manualAnswer || !consistencyResult || !resolutionData?.question?.fields?.length) return;
+    if (
+      !manualAnswer ||
+      !consistencyResult ||
+      !resolutionData?.question?.fields?.length
+    )
+      return;
 
-    const fieldKey = resolutionData.question.fields[0].label || resolutionData.question.fields[0].placeholder || resolutionData.question.fields[0].name;
+    const fieldKey =
+      resolutionData.question.fields[0].fieldKey ||
+      resolutionData.question.fields[0].name;
 
-    chrome.runtime.sendMessage({
-      type: "SAVE_OVERRIDE",
-      payload: {
-        field_key: fieldKey,
-        user_answer: manualAnswer,
-        status: consistencyResult.status,
-        rationale: consistencyResult.rationale
-      }
-    }, (response) => {
-      if (response?.success) {
-        setIsSaved(true);
-      }
-    });
+    chrome.runtime.sendMessage(
+      {
+        type: "SAVE_OVERRIDE",
+        tabId: currentTabId,
+        payload: {
+          field_key: fieldKey,
+          user_answer: manualAnswer,
+          status: consistencyResult.status,
+          rationale: consistencyResult.rationale,
+        },
+      },
+      (response) => {
+        if (response?.success) {
+          setIsSaved(true);
+        }
+      },
+    );
   };
 
   const handleCompletionResponse = (finished: boolean) => {
-    chrome.runtime.sendMessage({
-      type: "SESSION_COMPLETION_RESPONSE",
-      payload: { finished },
-    }, () => {
-      setShowCompletionPrompt(false);
-    });
+    chrome.runtime.sendMessage(
+      {
+        type: "SESSION_COMPLETION_RESPONSE",
+        tabId: currentTabId,
+        payload: { finished },
+      },
+      () => {
+        setShowCompletionPrompt(false);
+      },
+    );
   };
 
+  // The manual-answer widget must match the portal field it's overriding --
+  // a Yes/No radio question should offer Yes/No buttons, not a freeform text
+  // box the user could type "yess" into. A file/document field has no
+  // sensible "type an answer" flow at all.
+  const activeField = resolutionData?.question?.fields?.[0];
+  const activeFieldType = (activeField?.type || "").toLowerCase();
+  const activeFieldOptions: string[] = Array.isArray(activeField?.options)
+    ? activeField.options
+    : [];
+  const isFileField = activeFieldType === "file";
+  const isChoiceField =
+    (activeFieldType === "radio" || activeFieldType === "select") &&
+    activeFieldOptions.length > 0;
+  const isCheckboxField = activeFieldType === "checkbox";
+  const isNarrativeField = activeFieldType === "textarea";
+
   return (
-    <Box sx={{ width: '100%', minHeight: '400px', display: 'flex', flexDirection: 'column', bgcolor: '#ffffff', boxSizing: 'border-box' }}>
-      {/* Header */}
-      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', p: 2, borderBottom: '1px solid #e0e0e0' }}>
-        <Typography variant="h6" component="h1" sx={{ fontWeight: 'bold', color: '#172033' }}>
-          Immpal Copilot
-        </Typography>
-        {token && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <FormControlLabel
-              control={<Switch size="small" checked={!isPaused} onChange={handleTogglePause} color="success" />}
-              label={<Typography variant="caption">{!isPaused ? "Active" : "Paused"}</Typography>}
-              sx={{ m: 0 }}
-            />
-            <Tooltip title="Sign Out">
-              <IconButton size="small" onClick={handleSignOut} sx={{ color: 'text.secondary' }}>
-                <LogoutIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
+    <Box
+      sx={{
+        width: "100%",
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        bgcolor: "background.default",
+      }}
+    >
+      {/* Immpal Top Header */}
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          px: 2,
+          py: 1.5,
+          bgcolor: "#FFFFFF",
+          borderBottom: "1px solid #E2E8F0",
+          boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+        }}
+      >
+        <Box sx={{ display: "flex", alignItems: "center" }}>
+          <Box
+            component="img"
+            src={immpalLogo}
+            alt="immPAL"
+            sx={{
+              height: 25,
+              width: "auto",
+              display: "block",
+            }}
+          />
+        </Box>
+
+        {token ? (
+          <Tooltip
+            title={
+              !isPaused
+                ? "Copilot is actively assisting. Click to pause."
+                : "Copilot is paused. Click to activate."
+            }
+            arrow
+          >
+            <Box
+              onClick={handleTogglePause}
+              role="button"
+              tabIndex={0}
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                gap: 0.75,
+                px: 1.25,
+                py: 0.45,
+                borderRadius: "6px",
+                bgcolor: !isPaused ? "#ECFDF5" : "#F8FAFC",
+                border: "1px solid",
+                borderColor: !isPaused ? "#A7F3D0" : "#E2E8F0",
+                cursor: "pointer",
+                userSelect: "none",
+                transition: "all 0.15s ease",
+                "&:hover": {
+                  bgcolor: !isPaused ? "#D1FAE5" : "#F1F5F9",
+                  borderColor: !isPaused ? "#6EE7B7" : "#CBD5E1",
+                  transform: "translateY(-1px)",
+                },
+                "&:active": {
+                  transform: "translateY(0)",
+                },
+              }}
+            >
+              <Box
+                sx={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  bgcolor: !isPaused ? "#10B981" : "#F59E0B",
+                  boxShadow: !isPaused
+                    ? "0 0 6px rgba(16, 185, 129, 0.45)"
+                    : "none",
+                }}
+              />
+              <Typography
+                sx={{
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  color: !isPaused ? "#065F46" : "#475569",
+                  letterSpacing: 0.2,
+                  lineHeight: 1,
+                }}
+              >
+                {!isPaused ? "Active" : "Paused"}
+              </Typography>
+            </Box>
+          </Tooltip>
+        ) : (
+          <Box
+            sx={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 0.6,
+              px: 1.1,
+              py: 0.35,
+              borderRadius: "6px",
+              bgcolor: "#F8FAFC",
+              border: "1px solid #E2E8F0",
+            }}
+          >
+            <ShieldIcon sx={{ fontSize: 13, color: "#64748B" }} />
+            <Typography
+              sx={{
+                fontSize: "0.7rem",
+                fontWeight: 600,
+                color: "#64748B",
+                letterSpacing: 0.2,
+              }}
+            >
+              Ready to Connect
+            </Typography>
           </Box>
         )}
       </Box>
-      
+
       {token ? (
-        <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', flex: 1 }}>
-          <Box sx={{ mb: 2 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-              <Typography variant="subtitle2" color="primary.main" sx={{ fontWeight: 'bold' }}>Active Case</Typography>
-              {selectedCaseId && (
-                <Button
-                  size="small"
-                  onClick={handleEndSession}
-                  sx={{ textTransform: 'none', fontSize: '11px', color: 'text.secondary', minWidth: 0, p: '2px 6px' }}
+        <>
+          <Box
+            sx={{
+              p: 2,
+              display: "flex",
+              flexDirection: "column",
+              flex: 1,
+              gap: 1.75,
+              overflowY: "auto",
+            }}
+          >
+            {/* Assist Mode Switcher */}
+            <ToggleButtonGroup
+              value={assistMode}
+              exclusive
+              onChange={handleAssistModeChange}
+              fullWidth
+              size="small"
+            >
+              <ToggleButton value="autofill">
+                <AutofillModeIcon sx={{ fontSize: 18, mr: 1 }} />
+                Auto-fill Mode
+              </ToggleButton>
+              <ToggleButton value="focus">
+                <FocusModeIcon sx={{ fontSize: 18, mr: 1 }} />
+                Focus Assist
+              </ToggleButton>
+            </ToggleButtonGroup>
+
+            {/* Active Case Selector Card */}
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.5,
+                borderRadius: 1,
+                bgcolor: "#FFFFFF",
+                borderColor: "#E2E8F0",
+                boxShadow: "0 1px 3px rgba(15, 23, 42, 0.05)",
+              }}
+            >
+              <Box
+                sx={{
+                  display: "flex",
+                  alignItems: "center",
+                  mb: 1,
+                }}
+              >
+                <Typography
+                  variant="caption"
+                  sx={{
+                    fontWeight: 800,
+                    letterSpacing: 0.5,
+                    color: "#64748B",
+                    fontSize: "0.6875rem",
+                    textTransform: "uppercase",
+                  }}
                 >
-                  End Copilot Session
-                </Button>
-              )}
-            </Box>
-            <CaseSelector
-              onCaseSelect={setSelectedCaseId}
-              selectedCaseId={selectedCaseId}
-            />
-          </Box>
-
-          <Box sx={{ flex: 1, background: '#f4f5f7', p: 2, borderRadius: 2 }}>
-            {showCompletionPrompt && selectedCaseId && (
-              <Box sx={{ bgcolor: '#fff', p: 2, borderRadius: 1, border: '1px solid #dfe1e6', mb: 2 }}>
-                <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 1.5 }}>
-                  Are you finished with this questionnaire?
+                  ACTIVE APPLICATION
                 </Typography>
-                <Box sx={{ display: 'flex', gap: 1 }}>
-                  <Button variant="contained" fullWidth size="small" onClick={() => handleCompletionResponse(true)} sx={{ textTransform: 'none' }}>
-                    Yes, I'm finished
-                  </Button>
-                  <Button variant="outlined" fullWidth size="small" onClick={() => handleCompletionResponse(false)} sx={{ textTransform: 'none' }}>
-                    No, I'm still working
-                  </Button>
-                </Box>
               </Box>
-            )}
-            {!selectedCaseId ? (
-              <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", mt: 4 }}>
-                Please select a case above to begin.
-              </Typography>
-            ) : resolutionData ? (
-              <>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
-                  <Typography variant="caption" color="text.secondary">Detected Fields:</Typography>
-                  <Tooltip title="Clear Current Question">
-                    <IconButton size="small" onClick={handleClearQuestion} sx={{ padding: '2px' }}>
-                      <ClearIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </Box>
-                  <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 2, wordBreak: 'break-word' }}>
-                    {resolutionData.question.fields && resolutionData.question.fields.length > 0
-                      ? resolutionData.question.fields.map((f: any) => f.label || f.placeholder || f.name || f.id).join(', ')
-                      : (resolutionData.question.headings[0] || resolutionData.question.title)}
-                  </Typography>
 
-                  <Typography variant="caption" color="text.secondary">
-                    {!resolutionData.resolution ? 'Reading this question…' :
-                      resolutionData.resolution.status === "SUGGESTED_NARRATIVE" ? "Suggested response:" :
-                        resolutionData.resolution.status === "CLARIFICATION_REQUIRED" ? "Clarification needed:" :
-                          resolutionData.resolution.status === "INFORMATION_MISSING" ? "Information missing:" :
-                            "Suggested answer:"}
-                  </Typography>
-                  <Box sx={{
-                    bgcolor: '#fff', p: 1, borderRadius: 1, mb: 2, minHeight: '40px',
-                    border: resolutionData.resolution?.status === "CLARIFICATION_REQUIRED" ? '1px solid #f59e0b' : '1px solid #dfe1e6',
-                  }}>
-                    <Typography variant="body2">
-                      {!resolutionData.resolution ? "⏳ Reading this question…" :
-                        resolutionData.resolution.status === "DOCUMENT_REQUIRED" ?
-                          `We found a matching document: ${resolutionData.resolution.documentName || 'Document'}. Please download it and upload it here.` :
-                          resolutionData.resolution.status === "MULTIPLE_POSSIBLE_FACTS" ?
-                            "We found multiple possible answers for this field. Please select the correct one:" :
-                            (resolutionData.resolution.answer || resolutionData.resolution.message || "No answer available.")}
+              <CaseSelector
+                onCaseSelect={(id) => setSelectedCaseId(id)}
+                selectedCaseId={selectedCaseId}
+              />
+            </Paper>
+
+            {/* AUTOFILL MODE VIEW */}
+            {assistMode === "autofill" && (
+              <Paper
+                variant="outlined"
+                sx={{
+                  flex: 1,
+                  p: 2,
+                  borderRadius: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  bgcolor: "#FFFFFF",
+                  borderColor: "#E2E8F0",
+                  boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+                }}
+              >
+                {!selectedCaseId ? (
+                  <Box
+                    sx={{
+                      textAlign: "center",
+                      m: "auto",
+                      py: 4,
+                      color: "text.secondary",
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        width: 52,
+                        height: 52,
+                        borderRadius: 1,
+                        bgcolor: "#EFF6FF",
+                        color: BRAND_PRIMARY,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        mx: "auto",
+                        mb: 1.5,
+                      }}
+                    >
+                      <AutofillModeIcon sx={{ fontSize: 28 }} />
+                    </Box>
+                    <Typography
+                      variant="subtitle2"
+                      sx={{ fontWeight: 700, mb: 0.5 }}
+                    >
+                      Select an Application to Autofill
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Choose your application above to connect your verified
+                      profile data.
                     </Typography>
                   </Box>
+                ) : (
+                  <>
+                    {/* Feature Overview OR Persistent Summary Results */}
+                    {!autofillResult ? (
+                      <Box
+                        sx={{
+                          bgcolor: "#F8FAFC",
+                          p: 1.75,
+                          borderRadius: 1,
+                          border: "1px solid #E2E8F0",
+                          mb: 2,
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 1.25,
+                            mb: 1,
+                          }}
+                        >
+                          <Box
+                            sx={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: "6px",
+                              bgcolor: "#EFF6FF",
+                              color: BRAND_PRIMARY,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <AutofillModeIcon sx={{ fontSize: 20 }} />
+                          </Box>
+                          <Box>
+                            <Typography
+                              variant="subtitle2"
+                              sx={{ fontWeight: 700, color: "#0F172A" }}
+                            >
+                              1-Click Form Autofill
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{ color: "#64748B" }}
+                            >
+                              Cascading resolution of radios, dates & text
+                            </Typography>
+                          </Box>
+                        </Box>
 
-                  {resolutionData.resolution?.status === "CLARIFICATION_REQUIRED" && (
-                    <Box sx={{ mb: 1 }}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        placeholder="Answer the clarifying question above..."
-                        value={clarificationAnswer}
-                        onChange={(e) => setClarificationAnswer(e.target.value)}
-                        sx={{ bgcolor: '#fff', mb: 1 }}
-                      />
+                        <Box
+                          sx={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 0.75,
+                            mt: 1.5,
+                          }}
+                        >
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 1,
+                            }}
+                          >
+                            <ShieldIcon
+                              sx={{ fontSize: 16, color: "#059669" }}
+                            />
+                            <Typography
+                              variant="caption"
+                              sx={{ color: "#334155", fontWeight: 600 }}
+                            >
+                              100% Governed Application Data
+                            </Typography>
+                          </Box>
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 1,
+                            }}
+                          >
+                            <CheckIcon
+                              sx={{ fontSize: 16, color: BRAND_PRIMARY }}
+                            />
+                            <Typography
+                              variant="caption"
+                              sx={{ color: "#334155", fontWeight: 600 }}
+                            >
+                              Auto-unhides dynamic child questions
+                            </Typography>
+                          </Box>
+                        </Box>
+                      </Box>
+                    ) : (
+                      <Paper
+                        elevation={0}
+                        sx={{
+                          p: 1.75,
+                          borderRadius: 1,
+                          border: "1px solid #E2E8F0",
+                          bgcolor: "#FFFFFF",
+                          mb: 2,
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            mb: 1.25,
+                          }}
+                        >
+                          <Typography
+                            variant="subtitle2"
+                            sx={{ fontWeight: 700, color: "#0F172A" }}
+                          >
+                            Page Autofill Results
+                          </Typography>
+                          <Box sx={{ display: "flex", gap: 0.75 }}>
+                            <Chip
+                              label={`${autofillResult.filledCount} Filled`}
+                              size="small"
+                              sx={{
+                                bgcolor: "#ECFDF5",
+                                color: "#065F46",
+                                fontWeight: 700,
+                                border: "1px solid #A7F3D0",
+                                fontSize: "0.725rem",
+                                height: 22,
+                              }}
+                            />
+                            {autofillResult.skippedCount > 0 && (
+                              <Chip
+                                label={`${autofillResult.skippedCount} Need Review`}
+                                size="small"
+                                sx={{
+                                  bgcolor: "#FFFBEB",
+                                  color: "#92400E",
+                                  fontWeight: 700,
+                                  border: "1px solid #FDE68A",
+                                  fontSize: "0.725rem",
+                                  height: 22,
+                                }}
+                              />
+                            )}
+                          </Box>
+                        </Box>
+
+                        {/* Skipped / Attention Items */}
+                        {autofillResult.skippedCount > 0 && (
+                          <Box sx={{ mb: 1.5 }}>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                fontWeight: 800,
+                                color: "#64748B",
+                                textTransform: "uppercase",
+                                letterSpacing: 0.4,
+                                display: "block",
+                                fontSize: "0.6875rem",
+                                mb: 0.75,
+                              }}
+                            >
+                              Questions Requiring Your Attention
+                            </Typography>
+                            <Box
+                              sx={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 0.75,
+                                maxHeight: 160,
+                                overflowY: "auto",
+                                pr: 0.5,
+                              }}
+                            >
+                              {autofillResult.skippedItems.map((item) => (
+                                <Box
+                                  key={item.key}
+                                  onClick={() => handleJumpToField(item.key)}
+                                  sx={{
+                                    p: 1,
+                                    borderRadius: 1,
+                                    bgcolor: "#FFFDF5",
+                                    border: "1px solid #FEF3C7",
+                                    cursor: "pointer",
+                                    transition: "all 0.15s ease",
+                                    "&:hover": {
+                                      bgcolor: "#FEF9C3",
+                                      borderColor: "#FDE047",
+                                    },
+                                  }}
+                                >
+                                  <Box
+                                    sx={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      gap: 1,
+                                    }}
+                                  >
+                                    <Typography
+                                      variant="body2"
+                                      sx={{
+                                        fontWeight: 600,
+                                        color: "#1E293B",
+                                        fontSize: "0.8rem",
+                                        lineHeight: 1.2,
+                                      }}
+                                    >
+                                      {cleanFieldLabel(item.label)}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        color: BRAND_PRIMARY,
+                                        fontWeight: 700,
+                                        fontSize: "0.7rem",
+                                        flexShrink: 0,
+                                      }}
+                                    >
+                                      Jump ↗
+                                    </Typography>
+                                  </Box>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      color: "#92400E",
+                                      display: "block",
+                                      mt: 0.25,
+                                      fontSize: "0.7rem",
+                                    }}
+                                  >
+                                    {item.reason}
+                                  </Typography>
+                                </Box>
+                              ))}
+                            </Box>
+                          </Box>
+                        )}
+
+                        {/* Filled Items Collapsible */}
+                        {autofillResult.filledCount > 0 && (
+                          <Box sx={{ mt: 0.75 }}>
+                            <Button
+                              size="small"
+                              onClick={() => setShowFilledList(!showFilledList)}
+                              sx={{
+                                color: "#475569",
+                                fontSize: "0.725rem",
+                                fontWeight: 600,
+                                p: 0,
+                                minWidth: 0,
+                                textTransform: "none",
+                                "&:hover": {
+                                  bgcolor: "transparent",
+                                  color: BRAND_PRIMARY,
+                                },
+                              }}
+                            >
+                              {showFilledList
+                                ? "▾ Hide filled questions"
+                                : `▸ View ${autofillResult.filledCount} filled questions`}
+                            </Button>
+                            {showFilledList && (
+                              <Box
+                                sx={{
+                                  mt: 0.75,
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 0.5,
+                                  maxHeight: 130,
+                                  overflowY: "auto",
+                                  pr: 0.5,
+                                }}
+                              >
+                                {autofillResult.filledItems.map((item) => (
+                                  <Box
+                                    key={item.key}
+                                    onClick={() => handleJumpToField(item.key)}
+                                    sx={{
+                                      p: 0.75,
+                                      bgcolor: "#F8FAFC",
+                                      borderRadius: 1,
+                                      border: "1px solid #E2E8F0",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      justifyContent: "space-between",
+                                      gap: 1,
+                                      cursor: "pointer",
+                                      "&:hover": { borderColor: "#CBD5E1" },
+                                    }}
+                                  >
+                                    <Box
+                                      sx={{ overflow: "hidden", minWidth: 0 }}
+                                    >
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          fontWeight: 600,
+                                          color: "#334155",
+                                          display: "block",
+                                        }}
+                                        noWrap
+                                      >
+                                        {cleanFieldLabel(item.label)}
+                                      </Typography>
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          color: "#64748B",
+                                          display: "block",
+                                        }}
+                                        noWrap
+                                      >
+                                        {item.value}
+                                      </Typography>
+                                    </Box>
+                                    <CheckIcon
+                                      sx={{
+                                        fontSize: 15,
+                                        color: "#10B981",
+                                        flexShrink: 0,
+                                      }}
+                                    />
+                                  </Box>
+                                ))}
+                              </Box>
+                            )}
+                          </Box>
+                        )}
+                      </Paper>
+                    )}
+
+                    {/* Status Banner */}
+                    {autofillStatus && (
+                      <Fade in>
+                        <Paper
+                          elevation={0}
+                          sx={{
+                            p: 1.75,
+                            borderRadius: 1,
+                            mb: 2,
+                            border: "1px solid",
+                            bgcolor:
+                              autofillStatus.type === "success"
+                                ? "#ECFDF5"
+                                : autofillStatus.type === "error"
+                                  ? "#FEF2F2"
+                                  : "#EFF6FF",
+                            borderColor:
+                              autofillStatus.type === "success"
+                                ? "#A7F3D0"
+                                : autofillStatus.type === "error"
+                                  ? "#FECACA"
+                                  : "#BFDBFE",
+                          }}
+                        >
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              gap: 1.25,
+                            }}
+                          >
+                            {autofillStatus.type === "info" && (
+                              <CircularProgress
+                                size={18}
+                                sx={{ color: BRAND_PRIMARY, mt: 0.25 }}
+                              />
+                            )}
+                            {autofillStatus.type === "success" && (
+                              <AnswerIcon
+                                sx={{ fontSize: 20, color: "#059669", mt: 0.1 }}
+                              />
+                            )}
+                            {autofillStatus.type === "error" && (
+                              <ErrorIcon
+                                sx={{ fontSize: 20, color: "#DC2626", mt: 0.1 }}
+                              />
+                            )}
+                            <Box sx={{ flex: 1 }}>
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight: 700,
+                                  color:
+                                    autofillStatus.type === "success"
+                                      ? "#065F46"
+                                      : autofillStatus.type === "error"
+                                        ? "#991B1B"
+                                        : "#1E40AF",
+                                }}
+                              >
+                                {autofillStatus.type === "success"
+                                  ? "Autofill Complete"
+                                  : autofillStatus.type === "error"
+                                    ? "Connection Notice"
+                                    : "Autofilling Page…"}
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  display: "block",
+                                  color:
+                                    autofillStatus.type === "success"
+                                      ? "#047857"
+                                      : autofillStatus.type === "error"
+                                        ? "#B91C1C"
+                                        : "#2563EB",
+                                  mt: 0.25,
+                                }}
+                              >
+                                {autofillStatus.message}
+                              </Typography>
+
+                              {/* Helpful 1-click reload if tab connection lost */}
+                              {autofillStatus.type === "error" && (
+                                <Button
+                                  size="small"
+                                  variant="outlined"
+                                  onClick={handleReloadActiveTab}
+                                  startIcon={<RefreshIcon fontSize="small" />}
+                                  sx={{
+                                    mt: 1,
+                                    borderColor: "#FCA5A5",
+                                    color: "#991B1B",
+                                    fontSize: "0.75rem",
+                                    py: 0.5,
+                                    "&:hover": {
+                                      bgcolor: "#FEE2E2",
+                                      borderColor: "#EF4444",
+                                    },
+                                  }}
+                                >
+                                  Refresh Webpage Tab
+                                </Button>
+                              )}
+                            </Box>
+                          </Box>
+                        </Paper>
+                      </Fade>
+                    )}
+
+                    {/* Primary CTA / Actions */}
+                    <Box
+                      sx={{
+                        mt: "auto",
+                        pt: 1,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 1,
+                      }}
+                    >
+                      {autofillResult && autofillResult.skippedCount > 0 ? (
+                        <>
+                          <Button
+                            variant="contained"
+                            color="primary"
+                            fullWidth
+                            size="large"
+                            disabled={autofillStatus?.type === "info"}
+                            onClick={() => handleStartAutofill(true)}
+                            startIcon={
+                              autofillStatus?.type === "info" ? (
+                                <CircularProgress size={20} color="inherit" />
+                              ) : (
+                                <AutofillModeIcon />
+                              )
+                            }
+                            sx={{
+                              py: 1.4,
+                              fontSize: "0.925rem",
+                              fontWeight: 700,
+                              letterSpacing: 0.2,
+                            }}
+                          >
+                            {autofillStatus?.type === "info"
+                              ? "Writing Answers to Form…"
+                              : `Fill Remaining Fields (${autofillResult.skippedCount})`}
+                          </Button>
+                          <Button
+                            variant="text"
+                            size="small"
+                            disabled={autofillStatus?.type === "info"}
+                            onClick={() => handleStartAutofill(false)}
+                            sx={{
+                              color: "#64748B",
+                              fontSize: "0.75rem",
+                              fontWeight: 600,
+                              textTransform: "none",
+                              py: 0.5,
+                              "&:hover": {
+                                color: BRAND_PRIMARY,
+                                bgcolor: "transparent",
+                              },
+                            }}
+                          >
+                            Re-run Full Auto-fill
+                          </Button>
+                        </>
+                      ) : autofillResult &&
+                        autofillResult.skippedCount === 0 ? (
+                        <>
+                          <Box
+                            sx={{
+                              p: 1.5,
+                              borderRadius: 1,
+                              bgcolor: "#ECFDF5",
+                              border: "1px solid #A7F3D0",
+                              textAlign: "center",
+                            }}
+                          >
+                            <Typography
+                              variant="subtitle2"
+                              sx={{ fontWeight: 700, color: "#065F46" }}
+                            >
+                              ✓ All Page Questions Answered
+                            </Typography>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: "#047857",
+                                display: "block",
+                                mt: 0.25,
+                              }}
+                            >
+                              Ready to review and proceed to next page.
+                            </Typography>
+                          </Box>
+                          <Button
+                            variant="text"
+                            size="small"
+                            onClick={() => handleStartAutofill(false)}
+                            sx={{
+                              color: "#64748B",
+                              fontSize: "0.75rem",
+                              fontWeight: 600,
+                              textTransform: "none",
+                              py: 0.5,
+                              "&:hover": {
+                                color: BRAND_PRIMARY,
+                                bgcolor: "transparent",
+                              },
+                            }}
+                          >
+                            Re-run Auto-fill
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          variant="contained"
+                          color="primary"
+                          fullWidth
+                          size="large"
+                          disabled={autofillStatus?.type === "info"}
+                          onClick={() => handleStartAutofill(false)}
+                          startIcon={
+                            autofillStatus?.type === "info" ? (
+                              <CircularProgress size={20} color="inherit" />
+                            ) : (
+                              <AutofillModeIcon />
+                            )
+                          }
+                          sx={{
+                            py: 1.4,
+                            fontSize: "0.925rem",
+                            fontWeight: 700,
+                            letterSpacing: 0.2,
+                          }}
+                        >
+                          {autofillStatus?.type === "info"
+                            ? "Writing Answers to Form…"
+                            : "Start Auto-fill"}
+                        </Button>
+                      )}
+                    </Box>
+                  </>
+                )}
+              </Paper>
+            )}
+
+            {/* FOCUS ASSIST MODE VIEW */}
+            {assistMode === "focus" && (
+              <Paper
+                variant="outlined"
+                sx={{
+                  flex: 1,
+                  p: 2,
+                  borderRadius: 1,
+                  display: "flex",
+                  flexDirection: "column",
+                  bgcolor: "#FFFFFF",
+                  borderColor: "#E2E8F0",
+                  boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
+                }}
+              >
+                {showCompletionPrompt && selectedCaseId && (
+                  <Paper
+                    elevation={0}
+                    sx={{
+                      p: 2,
+                      borderRadius: 1,
+                      border: "1px solid #FDE68A",
+                      bgcolor: "#FFFBEB",
+                      mb: 2,
+                    }}
+                  >
+                    <Typography
+                      variant="body2"
+                      sx={{ fontWeight: 700, mb: 1.5, color: "#92400E" }}
+                    >
+                      Are you finished with this portal step?
+                    </Typography>
+                    <Box sx={{ display: "flex", gap: 1 }}>
                       <Button
                         variant="contained"
                         fullWidth
                         size="small"
-                        disabled={!clarificationAnswer}
-                        onClick={() => {
-                          setManualAnswer(clarificationAnswer);
-                          setShowManualInput(true);
+                        onClick={() => handleCompletionResponse(true)}
+                        sx={{
+                          bgcolor: "#D97706",
+                          color: "#FFFFFF !important",
+                          fontWeight: 700,
+                          "&:hover": { bgcolor: "#B45309" },
                         }}
-                        sx={{ textTransform: 'none' }}
                       >
-                        Submit clarification
+                        Yes, finished
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        fullWidth
+                        size="small"
+                        onClick={() => handleCompletionResponse(false)}
+                        sx={{ color: "#92400E", borderColor: "#FCD34D" }}
+                      >
+                        Still working
                       </Button>
                     </Box>
-                  )}
+                  </Paper>
+                )}
 
-                  {resolutionData.resolution && (
-                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {resolutionData.resolution.answer && resolutionData.resolution.status !== "DOCUMENT_REQUIRED" && resolutionData.resolution.status !== "MULTIPLE_POSSIBLE_FACTS" && (
-                        <Button
-                          variant="contained"
-                          fullWidth
-                          color={copySuccess === resolutionData.resolution.answer ? "success" : "primary"}
-                          onClick={() => handleCopy(resolutionData.resolution!.answer)}
-                          sx={{ fontWeight: 'bold', textTransform: 'none' }}
+                {!selectedCaseId ? (
+                  <Box
+                    sx={{
+                      textAlign: "center",
+                      m: "auto",
+                      py: 4,
+                      color: "text.secondary",
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        width: 52,
+                        height: 52,
+                        borderRadius: 1,
+                        bgcolor: "#EFF6FF",
+                        color: BRAND_PRIMARY,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        mx: "auto",
+                        mb: 1.5,
+                      }}
+                    >
+                      <FocusModeIcon sx={{ fontSize: 32 }} />
+                    </Box>
+                    <Typography
+                      variant="subtitle2"
+                      sx={{ fontWeight: 700, mb: 0.5 }}
+                    >
+                      Select an Application to Start
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      Select your application above to start inspecting portal
+                      questions.
+                    </Typography>
+                  </Box>
+                ) : resolutionData ? (
+                  <>
+                    {/* Question Header */}
+                    <Box
+                      sx={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "flex-start",
+                        mb: 1,
+                      }}
+                    >
+                      <Box sx={{ flex: 1, pr: 1 }}>
+                        <Typography
+                          variant="caption"
+                          sx={{
+                            fontWeight: 800,
+                            letterSpacing: 0.5,
+                            color: "#64748B",
+                            fontSize: "0.6875rem",
+                            textTransform: "uppercase",
+                          }}
                         >
-                          {copySuccess === resolutionData.resolution.answer ? 'Copied!' : 'Copy to Clipboard'}
-                        </Button>
-                      )}
-                      {resolutionData.resolution.status === "MULTIPLE_POSSIBLE_FACTS" && resolutionData.resolution.multipleAnswers && (
-                        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                          {resolutionData.resolution.multipleAnswers.map((ans, idx) => (
-                            <Button
-                              key={idx}
-                              variant="outlined"
-                              fullWidth
-                              color={copySuccess === ans ? "success" : "primary"}
-                              onClick={() => handleCopy(ans)}
-                              sx={{ fontWeight: 'bold', textTransform: 'none', justifyContent: 'flex-start', textAlign: 'left' }}
-                            >
-                              {copySuccess === ans ? 'Copied!' : ans}
-                            </Button>
-                          ))}
-                        </Box>
-                      )}
-                      {resolutionData.resolution.status === "DOCUMENT_REQUIRED" && resolutionData.resolution.downloadUrl && (
-                        <Button
-                          variant="contained" 
-                          fullWidth
-                          color="primary"
-                          onClick={() => window.open(resolutionData.resolution!.downloadUrl, '_blank')}
-                          sx={{ fontWeight: 'bold', textTransform: 'none' }}
+                          DETECTED QUESTION
+                        </Typography>
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontWeight: 700,
+                            color: "#0F172A",
+                            mt: 0.25,
+                            wordBreak: "break-word",
+                          }}
                         >
-                          Download {resolutionData.resolution.documentName || "Document"}
-                        </Button>
-                      )}
-                      {!showManualInput ? (
-                        <Button
-                          variant="outlined"
-                          fullWidth
-                          color="secondary"
-                          onClick={() => setShowManualInput(true)}
-                          sx={{ fontWeight: 'bold', textTransform: 'none' }}
+                          {cleanFieldLabel(
+                            resolutionData.question.fields &&
+                              resolutionData.question.fields.length > 0
+                              ? resolutionData.question.fields
+                                  .map(
+                                    (f: any) =>
+                                      f.label ||
+                                      f.placeholder ||
+                                      f.name ||
+                                      f.id,
+                                  )
+                                  .join(", ")
+                              : resolutionData.question.headings[0] ||
+                                  resolutionData.question.title,
+                          )}
+                        </Typography>
+                      </Box>
+                      <Tooltip title="Clear Active Inspection">
+                        <IconButton
+                          size="small"
+                          onClick={handleClearQuestion}
+                          sx={{
+                            color: "#94A3B8",
+                            "&:hover": { color: "#0F172A", bgcolor: "#F1F5F9" },
+                          }}
                         >
-                          I'll answer this myself
-                        </Button>
-                      ) : (
-                        <Box sx={{ mt: 2, p: 2, bgcolor: '#f9fafb', borderRadius: 2, border: '1px solid #dfe1e6' }}>
-                          <Typography variant="caption" sx={{ fontWeight: 'bold', mb: 1, display: 'block' }}>
-                            Share my answer with IMMPAL
+                          <ClearIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+
+                    <Divider sx={{ my: 1.25, borderColor: "#F1F5F9" }} />
+
+                    {!resolutionData.resolution ? (
+                      <Box
+                        sx={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 1.25,
+                          py: 2,
+                          color: "text.secondary",
+                        }}
+                      >
+                        <CircularProgress
+                          size={18}
+                          sx={{ color: BRAND_PRIMARY }}
+                        />
+                        <Typography variant="body2" sx={{ color: "#475569" }}>
+                          Analyzing case facts with Copilot…
+                        </Typography>
+                      </Box>
+                    ) : (
+                      <>
+                        {/* Status Chip */}
+                        {(() => {
+                          const status = resolutionData.resolution.status;
+                          const meta = STATUS_META[status] || STATUS_META.ERROR;
+                          return (
+                            <Chip
+                              size="small"
+                              icon={meta.icon}
+                              label={meta.label}
+                              sx={{
+                                mb: 1.5,
+                                alignSelf: "flex-start",
+                                bgcolor: meta.bg,
+                                color: meta.fg,
+                                border: `1px solid ${meta.border}`,
+                                fontWeight: 700,
+                                "& .MuiChip-icon": { ml: 0.75 },
+                              }}
+                            />
+                          );
+                        })()}
+
+                        {/* Answer Card */}
+                        <Box
+                          sx={{
+                            bgcolor: "#F8FAFC",
+                            p: 2,
+                            borderRadius: 1,
+                            mb: 2,
+                            border: "1px solid #E2E8F0",
+                          }}
+                        >
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              color: "#0F172A",
+                              lineHeight: 1.5,
+                              fontWeight: 500,
+                            }}
+                          >
+                            {resolutionData.resolution.status ===
+                            "DOCUMENT_REQUIRED"
+                              ? `We found a matching document: ${
+                                  resolutionData.resolution.documentName ||
+                                  "Document"
+                                }. Please download it and upload it to the portal.`
+                              : resolutionData.resolution.status ===
+                                  "MULTIPLE_POSSIBLE_FACTS"
+                                ? "We found multiple possible answers in the case profile. Select one:"
+                                : resolutionData.resolution.answer ||
+                                  resolutionData.resolution.message ||
+                                  "No answer available."}
                           </Typography>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            placeholder="Type your answer here..."
-                            value={manualAnswer}
-                            onChange={(e) => setManualAnswer(e.target.value)}
-                            sx={{ bgcolor: '#fff', mb: 1 }}
-                          />
-                          <Button
-                            variant="contained" 
+                        </Box>
+                      </>
+                    )}
+
+                    {/* Actions (Insert / Copy / Download / Manual) */}
+                    {resolutionData.resolution && (
+                      <Box
+                        sx={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 1,
+                        }}
+                      >
+                        {resolutionData.resolution.answer &&
+                          resolutionData.resolution.status !==
+                            "DOCUMENT_REQUIRED" &&
+                          resolutionData.resolution.status !==
+                            "MULTIPLE_POSSIBLE_FACTS" && (
+                            <Box sx={{ display: "flex", gap: 1, alignItems: "stretch" }}>
+                              <Button
+                                variant="contained"
+                                color={insertSuccess ? "success" : "primary"}
+                                startIcon={
+                                  insertSuccess ? (
+                                    <CheckIcon sx={{ fontSize: 18, color: "#FFFFFF" }} />
+                                  ) : (
+                                    <AutofillModeIcon sx={{ fontSize: 18, color: "#FFFFFF" }} />
+                                  )
+                                }
+                                onClick={() =>
+                                  handleAccept(
+                                    resolutionData.resolution!.answer!,
+                                  )
+                                }
+                                sx={{
+                                  flex: 1,
+                                  py: 1.15,
+                                  fontWeight: 700,
+                                  fontSize: "0.875rem",
+                                  color: "#FFFFFF !important",
+                                }}
+                              >
+                                {insertSuccess
+                                  ? "Inserted — Advancing…"
+                                  : "Insert into Form Field"}
+                              </Button>
+
+                              <Tooltip
+                                title={
+                                  copySuccess === resolutionData.resolution.answer
+                                    ? "Copied to clipboard!"
+                                    : "Copy to clipboard"
+                                }
+                                arrow
+                              >
+                                <Button
+                                  variant="outlined"
+                                  startIcon={
+                                    copySuccess === resolutionData.resolution.answer ? (
+                                      <CheckIcon sx={{ fontSize: 17, color: "#059669" }} />
+                                    ) : (
+                                      <CopyIcon sx={{ fontSize: 17 }} />
+                                    )
+                                  }
+                                  onClick={() =>
+                                    handleCopy(resolutionData.resolution!.answer)
+                                  }
+                                  sx={{
+                                    minWidth: 84,
+                                    px: 1.5,
+                                    fontWeight: 600,
+                                    fontSize: "0.8125rem",
+                                    borderRadius: "8px",
+                                    borderColor:
+                                      copySuccess === resolutionData.resolution.answer
+                                        ? "#86EFAC"
+                                        : "#CBD5E1",
+                                    bgcolor:
+                                      copySuccess === resolutionData.resolution.answer
+                                        ? "#F0FDF4"
+                                        : "#FFFFFF",
+                                    color:
+                                      copySuccess === resolutionData.resolution.answer
+                                        ? "#059669"
+                                        : "#334155",
+                                    "&:hover": {
+                                      bgcolor:
+                                        copySuccess === resolutionData.resolution.answer
+                                          ? "#DCFCE7"
+                                          : "#F8FAFC",
+                                      borderColor:
+                                        copySuccess === resolutionData.resolution.answer
+                                          ? "#4ADE80"
+                                          : BRAND_PRIMARY,
+                                      color:
+                                        copySuccess === resolutionData.resolution.answer
+                                          ? "#047857"
+                                          : BRAND_PRIMARY,
+                                    },
+                                  }}
+                                >
+                                  {copySuccess === resolutionData.resolution.answer
+                                    ? "Copied"
+                                    : "Copy"}
+                                </Button>
+                              </Tooltip>
+                            </Box>
+                          )}
+
+                        {resolutionData.resolution.status ===
+                          "MULTIPLE_POSSIBLE_FACTS" &&
+                          resolutionData.resolution.multipleAnswers && (
+                            <Box
+                              sx={{
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 1,
+                              }}
+                            >
+                              {resolutionData.resolution.multipleAnswers.map(
+                                (ans, idx) => (
+                                  <Button
+                                    key={idx}
+                                    variant="outlined"
+                                    fullWidth
+                                    onClick={() => handleAccept(ans)}
+                                    sx={{
+                                      justifyContent: "flex-start",
+                                      textAlign: "left",
+                                      py: 1,
+                                      borderColor:
+                                        copySuccess === ans
+                                          ? "#10B981"
+                                          : "#E2E8F0",
+                                      color:
+                                        copySuccess === ans
+                                          ? "#059669"
+                                          : "#0F172A",
+                                    }}
+                                  >
+                                    {ans}
+                                  </Button>
+                                ),
+                              )}
+                            </Box>
+                          )}
+
+                        {resolutionData.resolution.status ===
+                          "DOCUMENT_REQUIRED" &&
+                          resolutionData.resolution.downloadUrl && (
+                            <Button
+                              variant="contained"
+                              fullWidth
+                              color="secondary"
+                              onClick={() =>
+                                window.open(
+                                  resolutionData.resolution!.downloadUrl,
+                                  "_blank",
+                                )
+                              }
+                              sx={{ py: 1.2, color: "#FFFFFF !important" }}
+                            >
+                              Download{" "}
+                              {resolutionData.resolution.documentName ||
+                                "Document"}
+                            </Button>
+                          )}
+
+                        {/* When there is NO autofill answer (e.g. INFORMATION_MISSING or manual selection), provide a primary "Next Question" button */}
+                        {!resolutionData.resolution.answer &&
+                          resolutionData.resolution.status !== "MULTIPLE_POSSIBLE_FACTS" && (
+                            <Button
+                              variant="contained"
+                              color="primary"
+                              fullWidth
+                              endIcon={<ArrowIcon sx={{ fontSize: 18, color: "#FFFFFF" }} />}
+                              onClick={handleAdvanceNextField}
+                              sx={{
+                                py: 1.15,
+                                fontWeight: 700,
+                                fontSize: "0.875rem",
+                                color: "#FFFFFF !important",
+                                borderRadius: "8px",
+                              }}
+                            >
+                              Next Question
+                            </Button>
+                          )}
+
+                        {/* Manual Override & Next Question Navigation --
+                            not offered for file/document fields, which have
+                            no sensible "type an answer" flow. */}
+                        {!isFileField && (!showManualInput ? (
+                          <Box
+                            sx={{
+                              display: "flex",
+                              justifyContent: resolutionData.resolution.answer ? "space-between" : "center",
+                              alignItems: "center",
+                              pt: 0.35,
+                            }}
+                          >
+                            <Button
+                              variant="text"
+                              size="small"
+                              startIcon={<ManualAnswerIcon sx={{ fontSize: 14 }} />}
+                              onClick={() => setShowManualInput(true)}
+                              sx={{
+                                color: "#64748B",
+                                fontSize: "0.75rem",
+                                fontWeight: 600,
+                                py: 0.4,
+                                px: 1.25,
+                                borderRadius: "6px",
+                                textTransform: "none",
+                                "&:hover": {
+                                  color: BRAND_PRIMARY,
+                                  bgcolor: "rgba(37, 99, 235, 0.04)",
+                                },
+                              }}
+                            >
+                              I'll answer this question myself
+                            </Button>
+
+                            {resolutionData.resolution.answer && (
+                              <Button
+                                variant="text"
+                                size="small"
+                                endIcon={<ArrowIcon sx={{ fontSize: 14 }} />}
+                                onClick={handleAdvanceNextField}
+                                sx={{
+                                  color: BRAND_PRIMARY,
+                                  fontSize: "0.75rem",
+                                  fontWeight: 700,
+                                  py: 0.4,
+                                  px: 1.25,
+                                  borderRadius: "6px",
+                                  textTransform: "none",
+                                  "&:hover": {
+                                    color: "#1D4ED8",
+                                    bgcolor: "rgba(37, 99, 235, 0.04)",
+                                  },
+                                }}
+                              >
+                                Next Question
+                              </Button>
+                            )}
+                          </Box>
+                        ) : (
+                          <Paper
+                            variant="outlined"
+                            sx={{
+                              mt: 1,
+                              p: 1.75,
+                              borderRadius: 1,
+                              bgcolor: "#F8FAFC",
+                              borderColor: "#E2E8F0",
+                            }}
+                          >
+                            <Box
+                              sx={{
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                mb: 1,
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  fontWeight: 700,
+                                  color: "#0F172A",
+                                  fontSize: "0.775rem",
+                                }}
+                              >
+                                Validate & Save to Immpal Dossier
+                              </Typography>
+                              <IconButton
+                                size="small"
+                                onClick={() => {
+                                  setShowManualInput(false);
+                                  setConsistencyResult(null);
+                                  setManualAnswer("");
+                                }}
+                                sx={{
+                                  p: 0.25,
+                                  color: "#94A3B8",
+                                  "&:hover": { color: "#475569" },
+                                }}
+                              >
+                                <ClearIcon sx={{ fontSize: 16 }} />
+                              </IconButton>
+                            </Box>
+                            {isChoiceField ? (
+                              <ToggleButtonGroup
+                                exclusive
+                                fullWidth
+                                value={manualAnswer || null}
+                                onChange={(_, val) => val !== null && setManualAnswer(val)}
+                                sx={{
+                                  mb: 1.5,
+                                  display: "flex",
+                                  flexWrap: "wrap",
+                                  gap: 0.75,
+                                  "& .MuiToggleButtonGroup-grouped": {
+                                    border: "1px solid #E2E8F0 !important",
+                                    borderRadius: "8px !important",
+                                    textTransform: "none",
+                                    flex: "1 1 auto",
+                                  },
+                                }}
+                              >
+                                {activeFieldOptions.map((option) => (
+                                  <ToggleButton
+                                    key={option}
+                                    value={option}
+                                    sx={{ fontSize: "0.8125rem", py: 0.75, px: 1.5 }}
+                                  >
+                                    {option}
+                                  </ToggleButton>
+                                ))}
+                              </ToggleButtonGroup>
+                            ) : isCheckboxField ? (
+                              <ToggleButtonGroup
+                                exclusive
+                                fullWidth
+                                value={manualAnswer || null}
+                                onChange={(_, val) => val !== null && setManualAnswer(val)}
+                                sx={{ mb: 1.5, display: "flex", gap: 0.75 }}
+                              >
+                                <ToggleButton value="true" sx={{ flex: 1, fontSize: "0.8125rem", py: 0.75 }}>
+                                  Yes
+                                </ToggleButton>
+                                <ToggleButton value="false" sx={{ flex: 1, fontSize: "0.8125rem", py: 0.75 }}>
+                                  No
+                                </ToggleButton>
+                              </ToggleButtonGroup>
+                            ) : (
+                              <TextField
+                                fullWidth
+                                size="small"
+                                multiline={isNarrativeField}
+                                minRows={isNarrativeField ? 4 : undefined}
+                                placeholder={
+                                  isNarrativeField
+                                    ? "Type your narrative answer…"
+                                    : "Type your manual answer…"
+                                }
+                                value={manualAnswer}
+                                onChange={(e) => setManualAnswer(e.target.value)}
+                                sx={{ mb: 1.5 }}
+                              />
+                            )}
+                            <Button
+                              variant="contained"
                               fullWidth
                               size="small"
-                              color="primary"
                               onClick={handleCheckConsistency}
                               disabled={!manualAnswer || isChecking}
-                              sx={{ textTransform: 'none' }}
+                              sx={{ py: 1, color: "#FFFFFF !important" }}
                             >
-                              {isChecking ? <CircularProgress size={20} color="inherit" /> : 'Check Consistency'}
+                              {isChecking ? (
+                                <CircularProgress size={18} color="inherit" />
+                              ) : (
+                                "Check Consistency with Dossier"
+                              )}
                             </Button>
 
                             {consistencyResult && (
-                              <Box sx={{ mt: 2 }}>
-                                <Typography variant="body2" color={consistencyResult.status === 'CONSISTENT' ? 'success.main' : 'warning.main'} sx={{ fontWeight: 'bold' }}>
-                                  Status: {consistencyResult.status}
+                              <Box
+                                sx={{
+                                  mt: 1.5,
+                                  p: 1.5,
+                                  bgcolor: "#FFFFFF",
+                                  borderRadius: 1,
+                                  border: "1px solid #E2E8F0",
+                                }}
+                              >
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    fontWeight: 700,
+                                    color:
+                                      consistencyResult.status === "CONSISTENT"
+                                        ? "#059669"
+                                        : "#D97706",
+                                    display: "block",
+                                  }}
+                                >
+                                  Consistency: {consistencyResult.status}
                                 </Typography>
                                 {consistencyResult.rationale && (
-                                  <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, mb: 1 }}>
+                                  <Typography
+                                    variant="caption"
+                                    color="text.secondary"
+                                    sx={{ display: "block", mt: 0.5 }}
+                                  >
                                     {consistencyResult.rationale}
                                   </Typography>
                                 )}
 
-                                {(consistencyResult.status === 'NEW_INFORMATION' || consistencyResult.status === 'CONFLICT') && (
-                                  <Box sx={{ mt: 1, p: 1, bgcolor: '#fff3cd', borderRadius: 1 }}>
-                                    <Typography variant="caption" color="text.primary" sx={{ display: 'block', mb: 1 }}>
-                                      This differs from your Immpal profile. Save this answer to your Case for future forms?
-                                    </Typography>
-                                    <Button
-                                      variant="outlined"
-                                      size="small"
-                                      color="warning"
-                                      fullWidth
-                                      onClick={handleSaveOverride}
-                                      disabled={isSaved}
-                                      sx={{ textTransform: 'none', fontWeight: 'bold' }}
-                                    >
-                                    {isSaved ? 'Saved to Immpal ✓' : 'Save Update'}
-                                  </Button>
-                                </Box>
-                              )}
-                            </Box>
-                          )}
-                        </Box>
-                      )}
+                                <Button
+                                  variant="outlined"
+                                  size="small"
+                                  fullWidth
+                                  onClick={handleSaveOverride}
+                                  disabled={isSaved}
+                                  sx={{ mt: 1 }}
+                                >
+                                  {isSaved
+                                    ? "Saved to Immpal ✓"
+                                    : "Save Update to Case"}
+                                </Button>
+                              </Box>
+                            )}
+                          </Paper>
+                        ))}
+                      </Box>
+                    )}
+                  </>
+                ) : (
+                  <Box
+                    sx={{
+                      textAlign: "center",
+                      m: "auto",
+                      py: 4,
+                      color: "text.secondary",
+                    }}
+                  >
+                    <Box
+                      sx={{
+                        width: 52,
+                        height: 52,
+                        borderRadius: 1,
+                        bgcolor: "#EFF6FF",
+                        color: BRAND_PRIMARY,
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        mx: "auto",
+                        mb: 1.5,
+                      }}
+                    >
+                      <FocusModeIcon sx={{ fontSize: 28 }} />
                     </Box>
-                  )}
-                </>
-              ) : (
-                <Typography variant="body2" color="text.secondary" sx={{ textAlign: "center", mt: 4 }}>
-                  Awaiting question detection...<br /><br />Navigate to an external portal to begin.
-              </Typography>
+                    <Typography
+                      variant="subtitle2"
+                      sx={{ fontWeight: 700, mb: 0.5, color: "#0F172A" }}
+                    >
+                      Ready to Inspect
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ maxWidth: 240, mx: "auto" }}
+                    >
+                      Click or focus into any portal question to get verified
+                      answers.
+                    </Typography>
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      endIcon={<ArrowIcon sx={{ fontSize: 15 }} />}
+                      onClick={handleAdvanceNextField}
+                      sx={{
+                        mt: 1.5,
+                        fontWeight: 600,
+                        fontSize: "0.775rem",
+                        borderRadius: "8px",
+                        borderColor: "#CBD5E1",
+                        color: BRAND_PRIMARY,
+                        textTransform: "none",
+                        "&:hover": {
+                          borderColor: BRAND_PRIMARY,
+                          bgcolor: "rgba(37, 99, 235, 0.04)",
+                        },
+                      }}
+                    >
+                      Find Next Question
+                    </Button>
+                  </Box>
+                )}
+              </Paper>
             )}
           </Box>
-        </Box>
-      ) : (
-        <Box sx={{ p: 3, textAlign: 'center', display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'center' }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-              Connect to the Immpal web app to fetch your case data and access the Copilot.
-          </Typography>
-          <Button 
-            variant="contained" 
-            color="primary" 
-            fullWidth
-            size="large"
-            onClick={() => chrome.runtime.sendMessage({ type: "INITIATE_LOGIN" })}
-            sx={{ py: 1.5, fontWeight: 'bold', textTransform: 'none', borderRadius: 2 }}
+
+          {/* Bottom Workspace Session Footer */}
+          <Box
+            sx={{
+              px: 2,
+              py: 1.15,
+              borderTop: "1px solid #E2E8F0",
+              bgcolor: "#FFFFFF",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexShrink: 0,
+            }}
           >
-            Login to Immpal
-          </Button>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.85 }}>
+              <Box
+                sx={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: "50%",
+                  bgcolor: "#10B981",
+                }}
+              />
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "#64748B",
+                  fontWeight: 600,
+                  fontSize: "0.725rem",
+                }}
+              >
+                Connected to Immpal Copilot
+              </Typography>
+            </Box>
+
+            <Button
+              size="small"
+              onClick={handleSignOut}
+              startIcon={<LogoutIcon sx={{ fontSize: 13 }} />}
+              sx={{
+                color: "#64748B",
+                fontSize: "0.725rem",
+                fontWeight: 600,
+                py: 0.35,
+                px: 1,
+                minWidth: 0,
+                borderRadius: 1,
+                border: "1px solid transparent",
+                "&:hover": {
+                  color: "#DC2626",
+                  bgcolor: "#FEF2F2",
+                },
+              }}
+            >
+              Sign Out
+            </Button>
+          </Box>
+        </>
+      ) : (
+        /* Logged Out / Login View */
+        <Box
+          sx={{
+            p: 2.5,
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            justifyContent: "space-between",
+            background:
+              "radial-gradient(ellipse 100% 50% at 50% 0%, rgba(37, 99, 235, 0.08) 0%, rgba(248, 250, 252, 0) 100%), #F8FAFC",
+            overflowY: "auto",
+          }}
+        >
+          <Box
+            sx={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              textAlign: "center",
+              pt: 2,
+              px: 0.5,
+            }}
+          >
+            {/* AI Copilot Badge */}
+            <Box
+              sx={{
+                width: 60,
+                height: 60,
+                borderRadius: "16px",
+                background: "linear-gradient(135deg, #EFF6FF 0%, #DBEAFE 100%)",
+                border: "1px solid #BFDBFE",
+                boxShadow:
+                  "0 8px 20px -4px rgba(37, 99, 235, 0.18), 0 2px 4px -1px rgba(37, 99, 235, 0.05)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                mb: 2,
+                position: "relative",
+              }}
+            >
+              <AutofillModeIcon
+                sx={{
+                  fontSize: 30,
+                  color: BRAND_PRIMARY,
+                  filter: "drop-shadow(0 2px 4px rgba(37, 99, 235, 0.25))",
+                }}
+              />
+              <Box
+                sx={{
+                  position: "absolute",
+                  bottom: -3,
+                  right: -3,
+                  width: 19,
+                  height: 19,
+                  borderRadius: "50%",
+                  bgcolor: "#FFFFFF",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  boxShadow: "0 2px 4px rgba(15, 23, 42, 0.1)",
+                  border: "1px solid #E2E8F0",
+                }}
+              >
+                <ShieldIcon sx={{ fontSize: 11, color: "#10B981" }} />
+              </Box>
+            </Box>
+
+            <Typography
+              variant="h6"
+              sx={{
+                fontWeight: 800,
+                color: "#0F172A",
+                mb: 0.75,
+                fontSize: "1.25rem",
+                letterSpacing: "-0.4px",
+                lineHeight: 1.25,
+              }}
+            >
+              Welcome to Immpal Copilot
+            </Typography>
+
+            <Typography
+              variant="body2"
+              color="text.secondary"
+              sx={{
+                mb: 2.75,
+                maxWidth: 290,
+                fontSize: "0.84rem",
+                lineHeight: 1.5,
+              }}
+            >
+              Connect your verified application profile to autofill official
+              immigration portal forms with 100% precision.
+            </Typography>
+
+            {/* Value Proposition Cards */}
+            <Box
+              sx={{
+                width: "100%",
+                display: "flex",
+                flexDirection: "column",
+                gap: 1.2,
+                mb: 2.5,
+                textAlign: "left",
+              }}
+            >
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.25,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1.25,
+                  bgcolor: "#FFFFFF",
+                  borderRadius: "10px",
+                  borderColor: "#E2E8F0",
+                  transition: "all 0.15s ease",
+                  "&:hover": {
+                    borderColor: "#CBD5E1",
+                    boxShadow: "0 2px 8px rgba(15, 23, 42, 0.04)",
+                  },
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: "8px",
+                    bgcolor: "#EFF6FF",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <AutofillModeIcon
+                    sx={{ fontSize: 19, color: BRAND_PRIMARY }}
+                  />
+                </Box>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    sx={{
+                      fontWeight: 700,
+                      fontSize: "0.8125rem",
+                      color: "#0F172A",
+                    }}
+                  >
+                    1-Click Portal Autofill
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "#64748B",
+                      lineHeight: 1.3,
+                      display: "block",
+                      fontSize: "0.72rem",
+                    }}
+                  >
+                    Fills portal questions across all steps and sections.
+                  </Typography>
+                </Box>
+              </Paper>
+
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.25,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1.25,
+                  bgcolor: "#FFFFFF",
+                  borderRadius: "10px",
+                  borderColor: "#E2E8F0",
+                  transition: "all 0.15s ease",
+                  "&:hover": {
+                    borderColor: "#CBD5E1",
+                    boxShadow: "0 2px 8px rgba(15, 23, 42, 0.04)",
+                  },
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: "8px",
+                    bgcolor: "#ECFDF5",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <ShieldIcon sx={{ fontSize: 19, color: "#059669" }} />
+                </Box>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    sx={{
+                      fontWeight: 700,
+                      fontSize: "0.8125rem",
+                      color: "#0F172A",
+                    }}
+                  >
+                    100% Verified Profile Data
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "#64748B",
+                      lineHeight: 1.3,
+                      display: "block",
+                      fontSize: "0.72rem",
+                    }}
+                  >
+                    Directly mapped from your audited application package.
+                  </Typography>
+                </Box>
+              </Paper>
+
+              <Paper
+                variant="outlined"
+                sx={{
+                  p: 1.25,
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 1.25,
+                  bgcolor: "#FFFFFF",
+                  borderRadius: "10px",
+                  borderColor: "#E2E8F0",
+                  transition: "all 0.15s ease",
+                  "&:hover": {
+                    borderColor: "#CBD5E1",
+                    boxShadow: "0 2px 8px rgba(15, 23, 42, 0.04)",
+                  },
+                }}
+              >
+                <Box
+                  sx={{
+                    width: 34,
+                    height: 34,
+                    borderRadius: "8px",
+                    bgcolor: "#F5F3FF",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  <FocusModeIcon sx={{ fontSize: 19, color: "#7C3AED" }} />
+                </Box>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    sx={{
+                      fontWeight: 700,
+                      fontSize: "0.8125rem",
+                      color: "#0F172A",
+                    }}
+                  >
+                    Focus Assist & Consistency
+                  </Typography>
+                  <Typography
+                    variant="caption"
+                    sx={{
+                      color: "#64748B",
+                      lineHeight: 1.3,
+                      display: "block",
+                      fontSize: "0.72rem",
+                    }}
+                  >
+                    Real-time field validation to avoid application rejections.
+                  </Typography>
+                </Box>
+              </Paper>
+            </Box>
+          </Box>
+
+          {/* Action Button & Security Footer */}
+          <Box sx={{ pt: 1, pb: 0.5 }}>
+            <Button
+              variant="contained"
+              color="primary"
+              fullWidth
+              size="large"
+              endIcon={<ArrowIcon />}
+              onClick={() =>
+                chrome.runtime.sendMessage({ type: "INITIATE_LOGIN" })
+              }
+              sx={{
+                py: 1.35,
+                fontSize: "0.9375rem",
+                fontWeight: 700,
+                borderRadius: "10px",
+                background: "linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%)",
+                boxShadow: "0 4px 14px rgba(37, 99, 235, 0.35)",
+                "&:hover": {
+                  background:
+                    "linear-gradient(135deg, #3B82F6 0%, #2563EB 100%)",
+                  boxShadow: "0 6px 20px rgba(37, 99, 235, 0.45)",
+                  transform: "translateY(-1px)",
+                },
+                "&:active": {
+                  transform: "translateY(0)",
+                },
+              }}
+            >
+              Sign in to Immpal
+            </Button>
+
+            <Box
+              sx={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 0.75,
+                mt: 1.5,
+              }}
+            >
+              <LockIcon sx={{ fontSize: 12, color: "#94A3B8" }} />
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "#94A3B8",
+                  fontSize: "0.71rem",
+                  fontWeight: 500,
+                }}
+              >
+                Secure authentication via your Immpal web session
+              </Typography>
+            </Box>
+          </Box>
         </Box>
       )}
     </Box>
   );
 };
-
 export default Popup;

@@ -43,7 +43,7 @@ export const CaseSelector: React.FC<CaseSelectorProps> = ({
     const fetchCases = async () => {
       try {
         setLoading(true);
-        const response = await fetchWithAuth('/cases/options?package_ready_only=true');
+        const response = await fetchWithAuth('/cases/options?package_ready_only=true&limit=100');
 
         if (!response.ok) {
           throw new Error('Failed to fetch cases');

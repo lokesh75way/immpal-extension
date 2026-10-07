@@ -735,9 +735,9 @@ export const Popup = () => {
           <Box
             component="img"
             src={immpalLogo}
-            alt="immPAL"
+            alt="IMMPAL"
             sx={{
-              height: 25,
+              height: 18,
               width: "auto",
               display: "block",
             }}

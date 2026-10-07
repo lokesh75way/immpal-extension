@@ -13,6 +13,7 @@ import {
   Chip,
   Divider,
   Fade,
+  Link,
 } from "@mui/material";
 import {
   Logout as LogoutIcon,
@@ -37,6 +38,8 @@ import {
 import { CaseSelector } from "./CaseSelector";
 import { BRAND_PRIMARY } from "../theme";
 import immpalLogo from "../assets/immpal-logo.png";
+
+const PRIVACY_POLICY_URL = `${(import.meta.env.VITE_FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "")}/#/privacy`;
 
 type AssistMode = "focus" | "autofill";
 
@@ -2622,27 +2625,43 @@ export const Popup = () => {
               </Typography>
             </Box>
 
-            <Button
-              size="small"
-              onClick={handleSignOut}
-              startIcon={<LogoutIcon sx={{ fontSize: 13 }} />}
-              sx={{
-                color: "#64748B",
-                fontSize: "0.725rem",
-                fontWeight: 600,
-                py: 0.35,
-                px: 1,
-                minWidth: 0,
-                borderRadius: 1,
-                border: "1px solid transparent",
-                "&:hover": {
-                  color: "#DC2626",
-                  bgcolor: "#FEF2F2",
-                },
-              }}
-            >
-              Sign Out
-            </Button>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 0.5 }}>
+              <Link
+                href={PRIVACY_POLICY_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                underline="hover"
+                sx={{
+                  color: "#64748B",
+                  fontSize: "0.725rem",
+                  fontWeight: 600,
+                  px: 1,
+                }}
+              >
+                Privacy
+              </Link>
+              <Button
+                size="small"
+                onClick={handleSignOut}
+                startIcon={<LogoutIcon sx={{ fontSize: 13 }} />}
+                sx={{
+                  color: "#64748B",
+                  fontSize: "0.725rem",
+                  fontWeight: 600,
+                  py: 0.35,
+                  px: 1,
+                  minWidth: 0,
+                  borderRadius: 1,
+                  border: "1px solid transparent",
+                  "&:hover": {
+                    color: "#DC2626",
+                    bgcolor: "#FEF2F2",
+                  },
+                }}
+              >
+                Sign Out
+              </Button>
+            </Box>
           </Box>
         </>
       ) : (
@@ -2974,6 +2993,26 @@ export const Popup = () => {
                 Secure authentication via your Immpal web session
               </Typography>
             </Box>
+
+            <Typography
+              variant="caption"
+              sx={{
+                display: "block",
+                textAlign: "center",
+                mt: 0.75,
+                fontSize: "0.71rem",
+              }}
+            >
+              <Link
+                href={PRIVACY_POLICY_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                underline="hover"
+                sx={{ color: "#64748B", fontWeight: 600 }}
+              >
+                Privacy Policy
+              </Link>
+            </Typography>
           </Box>
         </Box>
       )}
